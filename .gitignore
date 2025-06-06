@@ -1,0 +1,5 @@
+sessions/
+bot_controller_session.session
+db/*
+downloads/*
+.env
