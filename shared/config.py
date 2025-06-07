@@ -34,6 +34,10 @@ DB_PATH = os.getenv('DB_PATH', 'forwarder_data.sqlite')
 SESSIONS_DIR = "sessions"
 DOWNLOADS_DIR = "downloads"
 
+# --- Upload Limits ---
+MAX_UPLOAD_SIZE_MB = parse_int_env("MAX_UPLOAD_SIZE_MB", 2048)
+MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
 # --- Proxy ---
 PROXY_TYPE = os.getenv("PROXY_TYPE", "").lower() or None
 PROXY_HOST = os.getenv("PROXY_HOST", None) or None
