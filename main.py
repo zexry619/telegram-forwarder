@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 logging.getLogger('telethon').setLevel(logging.WARNING)
 
 # --- Import dari modul proyek ---
-from shared.config import BOT_TOKEN, SESSIONS_DIR, DOWNLOADS_DIR, API_ID, API_HASH
 from shared.database import init_db
 from bot.handlers import setup_handlers
 from user.manager import startup_all_workers, shutdown_all_workers
