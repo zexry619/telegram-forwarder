@@ -18,7 +18,7 @@ from shared.database import (
     db_check_duplicate_by_content_hash
 )
 from shared.config import DOWNLOADS_DIR
-from shared.config import ADMIN_USER_IDS
+from shared.config import MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_MB
 
 logger = logging.getLogger(__name__)
 
@@ -43,12 +43,6 @@ async def get_media_fingerprint(m):
         d = m.document; fp = [f"doc_{d.id}_{d.access_hash}",f"s{d.size}"]; [fp.extend([f"d{a.duration}",f"w{a.w}",f"h{a.h}"]) for a in d.attributes if isinstance(a,DocumentAttributeVideo)]; return "_".join(fp)
     return None
 
-async def send_admin_notification(bot_client, msg):
-    for admin_id in ADMIN_USER_IDS:
-        try:
-            await bot_client.send_message(admin_id, f"🚨 [BOT ERROR]:\n{msg}")
-        except Exception:
-            pass
 class UserWorker:
     def __init__(self, user_id: int, client, config: dict, bot_client):
         self.user_id = user_id
@@ -127,7 +121,6 @@ class UserWorker:
             else:
                 logger.warning(f"[USER_ID: {self.user_id}] ⚠️ Direct forward failed ({type(e).__name__}), queuing...")
                 await self._queue.put(event)
-            await send_admin_notification(self.bot_client, f"User {self.user_id} mengalami error: {e}")
     async def _process_queue(self):
         while self.status == 'running':
             try:
@@ -139,9 +132,29 @@ class UserWorker:
                 logger.info(f"[USER_ID: {self.user_id}] 📥 Processing MsgID {event.message.id} from queue. Downloading...")
                 try:
                     db_data = {'chat_id': event.chat_id, 'message_id': event.message.id, 'chat_name': chat_name, 'media_type': media_type, 'fingerprint': await get_media_fingerprint(event.message)}
+                    # Cek ukuran file sebelum diunduh jika informasinya tersedia
+                    if getattr(getattr(event.message, 'file', None), 'size', 0) > MAX_UPLOAD_SIZE_BYTES:
+                        logger.info(
+                            f"[USER_ID: {self.user_id}] Skip MsgID {event.message.id}: file melebihi batas.")
+                        await db_record_message(self.user_id, message_key, {
+                            **db_data, 'status': 'size_limit_exceeded_before_download'
+                        })
+                        await self.send_feedback(
+                            f"Pesan dari {chat_name} dilewati karena ukurannya di atas {MAX_UPLOAD_SIZE_MB} MB.")
+                        continue
                     file_path = await self.client.download_media(event.message, file=self.download_path)
                     if not file_path: raise ValueError("Download failed")
                     logger.info(f"[USER_ID: {self.user_id}] 📥 Downloaded: {os.path.basename(file_path)}")
+
+                    # Jika ukuran file tidak diketahui sebelumnya, cek setelah diunduh
+                    if os.path.getsize(file_path) > MAX_UPLOAD_SIZE_BYTES:
+                        logger.info(
+                            f"[USER_ID: {self.user_id}] File {file_path} melebihi batas.")
+                        db_data['status'] = 'size_limit_exceeded_after_download'
+                        await db_record_message(self.user_id, message_key, db_data)
+                        await self.send_feedback(
+                            f"File '{os.path.basename(file_path)}' lebih besar dari {MAX_UPLOAD_SIZE_MB} MB, tidak diupload.")
+                        continue
 
                     content_hash = await calculate_md5_hash(file_path)
                     if await db_check_duplicate_by_content_hash(self.user_id, content_hash):
@@ -170,7 +183,6 @@ class UserWorker:
                 except Exception as e:
                     error_msg = f"Failed to process MsgID {message_key}: {type(e).__name__}"; logger.error(f"[USER_ID: {self.user_id}] ❌ {error_msg}", exc_info=True)
                     await self.send_feedback(error_msg); db_data['status'] = f"error: {str(e)[:100]}"; await db_record_message(self.user_id, message_key, db_data)
-                    await send_admin_notification(self.bot_client, f"User {self.user_id} mengalami error: {e}")
                 finally:
                     if file_path and os.path.exists(file_path): os.remove(file_path)
                     self._queue.task_done()
