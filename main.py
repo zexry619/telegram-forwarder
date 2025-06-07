@@ -3,6 +3,7 @@ import os
 import logging
 import sys
 from telethon import TelegramClient
+from shared.config import BOT_TOKEN, SESSIONS_DIR, DOWNLOADS_DIR, API_ID, API_HASH, get_telethon_proxy
 
 # --- KONFIGURASI LOGGING ---
 log_format = '%(asctime)s - %(name)-18s - %(levelname)-8s - %(message)s'
@@ -21,7 +22,8 @@ from user.manager import startup_all_workers, shutdown_all_workers
 from utils.cleanup import cleanup_download_folder
 
 # --- Inisialisasi bot utama ---
-bot = TelegramClient('bot_controller_session', API_ID, API_HASH)
+proxy = get_telethon_proxy()
+bot = TelegramClient('bot_controller_session', API_ID, API_HASH, proxy=proxy)
 
 async def periodic_cleanup():
     """Auto-cleanup download folder setiap jam, hapus file lebih dari 24 jam."""

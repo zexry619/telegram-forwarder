@@ -7,10 +7,13 @@ from telethon import TelegramClient
 from shared.config import API_ID, API_HASH, SESSIONS_DIR
 from shared.database import get_user_config, update_user_config, get_all_running_users
 from .worker import UserWorker
+from shared.config import API_ID, API_HASH, SESSIONS_DIR, get_telethon_proxy
 
 logger = logging.getLogger(__name__)
 
 ACTIVE_SESSIONS = {}
+
+proxy = get_telethon_proxy()
 
 async def get_client_for_user(user_id: int):
     if user_id in ACTIVE_SESSIONS:
@@ -43,7 +46,7 @@ async def get_client_for_user(user_id: int):
 
 def get_new_client(user_id: int):
     session_path = os.path.join(SESSIONS_DIR, str(user_id))
-    return TelegramClient(session_path, API_ID, API_HASH)
+    return TelegramClient(session_path, API_ID, API_HASH, proxy=proxy)
 
 async def add_new_client(user_id: int, client: TelegramClient):
     if client and client.is_connected() and await client.is_user_authorized():
