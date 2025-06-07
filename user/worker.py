@@ -90,10 +90,15 @@ class UserWorker:
         if self.status != 'running' or not is_valid_media(event.message.media): return
         if event.out or event.chat_id in self.config['excluded_chat_ids'] or event.chat_id == self.config['target_chat_id']: return
 
+        media_type = get_media_type_string(event.message.media)
+        allowed = self.config.get('allowed_media_types', set())
+        if allowed and media_type not in allowed:
+            logger.info(f"[USER_ID: {self.user_id}] ⏩ Skip {media_type} not allowed.")
+            return
+
         try:
             chat = await event.get_chat()
             chat_name = getattr(chat, 'title', getattr(chat, 'first_name', f"Chat {event.chat_id}"))
-            media_type = get_media_type_string(event.message.media)
             logger.info(f"[USER_ID: {self.user_id}] 🆕 New {media_type} from '{chat_name}' (MsgID: {event.message.id})")
 
             message_key = f"{event.chat_id}_{event.message.id}"
@@ -129,6 +134,11 @@ class UserWorker:
                 file_path, db_data = None, {}
                 chat = await event.get_chat(); chat_name = getattr(chat,'title', f"Chat {event.chat_id}")
                 media_type = get_media_type_string(event.media)
+                allowed = self.config.get('allowed_media_types', set())
+                if allowed and media_type not in allowed:
+                    logger.info(f"[USER_ID: {self.user_id}] ⏩ Skip queued {media_type} not allowed.")
+                    self._queue.task_done()
+                    continue
                 logger.info(f"[USER_ID: {self.user_id}] 📥 Processing MsgID {event.message.id} from queue. Downloading...")
                 try:
                     db_data = {'chat_id': event.chat_id, 'message_id': event.message.id, 'chat_name': chat_name, 'media_type': media_type, 'fingerprint': await get_media_fingerprint(event.message)}

@@ -15,8 +15,11 @@ def main_menu_keyboard():
         ],
         [
             # Tombol ini sekarang langsung membawa ke daftar pilihan target
-            KeyboardButtonCallback("🎯 Pilih Target dari Daftar", b'list_chats'), 
+            KeyboardButtonCallback("🎯 Pilih Target dari Daftar", b'list_chats'),
             KeyboardButtonCallback("🚫 Atur Pengecualian", b'set_exclude')
+        ],
+        [
+            KeyboardButtonCallback("🗂 Filter Media", b'set_media_filter')
         ],
         [
             KeyboardButtonCallback("🔐 Login / Logout", b'auth_menu'),
@@ -98,5 +101,17 @@ def admin_user_management_keyboard():
         [KeyboardButtonCallback("👥 Lihat Allowed Users", b'admin_list_users')],
         [KeyboardButtonCallback("➕ Tambah Allowed User", b'admin_add_user')],
         [KeyboardButtonCallback("➖ Hapus Allowed User", b'admin_remove_user')],
+        [KeyboardButtonCallback("⬅️ Kembali ke Menu Utama", b'main_menu')]
+    ]
+
+def media_filter_keyboard(current: set):
+    def mark(text, cond):
+        return f"✅ {text}" if cond else text
+
+    return [
+        [KeyboardButtonCallback(mark("Semua Media", not current), b'media_filter_all')],
+        [KeyboardButtonCallback(mark("Hanya Foto", current == {'photo'}), b'media_filter_photo')],
+        [KeyboardButtonCallback(mark("Hanya Video", current == {'video'}), b'media_filter_video')],
+        [KeyboardButtonCallback(mark("Hanya Dokumen", current == {'document'}), b'media_filter_document')],
         [KeyboardButtonCallback("⬅️ Kembali ke Menu Utama", b'main_menu')]
     ]

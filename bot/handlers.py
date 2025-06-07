@@ -9,8 +9,9 @@ from shared.database import (
     allow_user, disallow_user, get_allowed_users, is_user_allowed
 )
 from .keyboards import (
-    main_menu_keyboard, auth_menu_keyboard, back_to_main_menu_button, 
-    exclude_menu_keyboard, dynamic_chat_list_keyboard, admin_user_management_keyboard
+    main_menu_keyboard, auth_menu_keyboard, back_to_main_menu_button,
+    exclude_menu_keyboard, dynamic_chat_list_keyboard, admin_user_management_keyboard,
+    media_filter_keyboard
 )
 from .conversations import setup_conversation_handlers
 from user.manager import (
@@ -234,6 +235,44 @@ def setup_handlers(bot):
         await update_user_config(user_id, 'excluded_chat_ids', excluded_ids)
         await event.answer(f"ID {chat_id} dihapus.", alert=False)
         await exclude_remove_list_handler(event) # Refresh
+
+    # --- HANDLER MEDIA FILTER ---
+    @bot.on(events.CallbackQuery(data=b'set_media_filter'))
+    @authorized_only
+    async def media_filter_menu_handler(event):
+        config = await get_user_config(event.sender_id)
+        current = config.get('allowed_media_types', set())
+        text = ("🗂 **Filter Media**\n\n"
+                "Pilih tipe media yang akan diteruskan:")
+        await try_edit(event, text, buttons=media_filter_keyboard(current))
+
+    @bot.on(events.CallbackQuery(data=b'media_filter_all'))
+    @authorized_only
+    async def media_filter_all_handler(event):
+        await update_user_config(event.sender_id, 'allowed_media_types', set())
+        await event.answer('Mengatur filter ke: semua media')
+        await media_filter_menu_handler(event)
+
+    @bot.on(events.CallbackQuery(data=b'media_filter_photo'))
+    @authorized_only
+    async def media_filter_photo_handler(event):
+        await update_user_config(event.sender_id, 'allowed_media_types', {'photo'})
+        await event.answer('Mengatur filter ke: hanya foto')
+        await media_filter_menu_handler(event)
+
+    @bot.on(events.CallbackQuery(data=b'media_filter_video'))
+    @authorized_only
+    async def media_filter_video_handler(event):
+        await update_user_config(event.sender_id, 'allowed_media_types', {'video'})
+        await event.answer('Mengatur filter ke: hanya video')
+        await media_filter_menu_handler(event)
+
+    @bot.on(events.CallbackQuery(data=b'media_filter_document'))
+    @authorized_only
+    async def media_filter_document_handler(event):
+        await update_user_config(event.sender_id, 'allowed_media_types', {'document'})
+        await event.answer('Mengatur filter ke: hanya dokumen')
+        await media_filter_menu_handler(event)
 
     # --- HANDLER OTENTIKASI & BANTUAN ---
     @bot.on(events.CallbackQuery(data=b'auth_menu'))
