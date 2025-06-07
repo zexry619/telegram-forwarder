@@ -3,3 +3,8 @@ bot_controller_session.session
 db/
 downloads/
 .env
+bot/__pycache__/
+shared/__pycache__/
+ utils/__pycache__/
+__pycache__/
+**/__pycache__/
