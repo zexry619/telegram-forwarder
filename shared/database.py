@@ -13,10 +13,17 @@ async def init_db():
                 user_id INTEGER PRIMARY KEY,
                 target_chat_id INTEGER,
                 excluded_chat_ids TEXT,
+                allowed_media_types TEXT,
                 status TEXT DEFAULT 'stopped' CHECK(status IN ('running', 'stopped', 'error', 'login_required')),
                 last_error TEXT
             )
         """)
+
+        # Tambahan kolom baru jika database lama masih belum memiliki kolom ini
+        async with db.execute("PRAGMA table_info(users)") as c:
+            cols = [r[1] for r in await c.fetchall()]
+            if 'allowed_media_types' not in cols:
+                await db.execute("ALTER TABLE users ADD COLUMN allowed_media_types TEXT")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS forwarded_messages (
                 user_id INTEGER NOT NULL,
@@ -41,15 +48,16 @@ async def init_db():
 
 async def get_user_config(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT target_chat_id, excluded_chat_ids, status FROM users WHERE user_id = ?", (user_id,)) as cursor:
+        async with db.execute("SELECT target_chat_id, excluded_chat_ids, allowed_media_types, status FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
             if not row:
                 await db.execute("INSERT INTO users (user_id) VALUES (?)", (user_id,))
                 await db.commit()
-                return {'target_chat_id': None, 'excluded_chat_ids': set(), 'status': 'stopped'}
-            target, excluded_json, status = row
+                return {'target_chat_id': None, 'excluded_chat_ids': set(), 'allowed_media_types': set(), 'status': 'stopped'}
+            target, excluded_json, allowed_json, status = row
             excluded = set(json.loads(excluded_json)) if excluded_json else set()
-            return {'target_chat_id': target, 'excluded_chat_ids': excluded, 'status': status}
+            allowed = set(json.loads(allowed_json)) if allowed_json else set()
+            return {'target_chat_id': target, 'excluded_chat_ids': excluded, 'allowed_media_types': allowed, 'status': status}
 
 async def get_all_running_users():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -59,9 +67,9 @@ async def get_all_running_users():
 
 async def update_user_config(user_id: int, key: str, value):
     async with aiosqlite.connect(DB_PATH) as db:
-        if key == 'excluded_chat_ids':
+        if key in ['excluded_chat_ids', 'allowed_media_types']:
             value = json.dumps(list(value))
-        allowed_keys = ['target_chat_id', 'excluded_chat_ids', 'status', 'last_error']
+        allowed_keys = ['target_chat_id', 'excluded_chat_ids', 'allowed_media_types', 'status', 'last_error']
         if key not in allowed_keys: raise ValueError(f"Invalid config key: {key}")
         await db.execute(f"UPDATE users SET {key} = ? WHERE user_id = ?", (value, user_id))
         await db.commit()
