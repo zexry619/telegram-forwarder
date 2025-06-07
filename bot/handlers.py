@@ -3,12 +3,14 @@ from telethon import events
 from telethon.errors import MessageNotModifiedError
 from telethon.tl.types import KeyboardButtonCallback
 
-# Impor dari modul lokal
-from shared.config import AUTHORIZED_USERS
-from shared.database import get_user_config, update_user_config
+from shared.config import ADMIN_USER_IDS
+from shared.database import (
+    get_user_config, update_user_config,
+    allow_user, disallow_user, get_allowed_users, is_user_allowed
+)
 from .keyboards import (
     main_menu_keyboard, auth_menu_keyboard, back_to_main_menu_button, 
-    exclude_menu_keyboard, dynamic_chat_list_keyboard
+    exclude_menu_keyboard, dynamic_chat_list_keyboard, admin_user_management_keyboard
 )
 from .conversations import setup_conversation_handlers
 from user.manager import (
@@ -18,40 +20,60 @@ from user.manager import (
 
 logger = logging.getLogger(__name__)
 
-# --- DECORATOR DAN HELPER ---
-
-def authorized_only(func):
-    async def wrapper(event):
-        if AUTHORIZED_USERS and event.sender_id not in AUTHORIZED_USERS:
-            await event.answer("Akses ditolak.", alert=True)
-            return
-        return await func(event)
-    return wrapper
-
-async def try_edit(event, text, **kwargs):
-    try:
-        await event.edit(text, **kwargs)
-    except MessageNotModifiedError:
-        await event.answer()
-
-# --- SETUP HANDLER UTAMA ---
+def request_access_keyboard():
+    return [[KeyboardButtonCallback("🚩 Request Access", b'request_access')]]
 
 def setup_handlers(bot):
-    
-    # --- HANDLER MENU UTAMA & DASAR ---
 
+    # --- AUTH DECORATOR ---
+    def authorized_only(func):
+        async def wrapper(event):
+            if event.sender_id in ADMIN_USER_IDS or await is_user_allowed(event.sender_id):
+                return await func(event)
+            else:
+                # Notifikasi admin: kirim tombol approve
+                msg = f"❗ User `{event.sender_id}` meminta akses ke bot."
+                for admin_id in ADMIN_USER_IDS:
+                    try:
+                        await bot.send_message(
+                            admin_id, msg,
+                            buttons=[
+                                [KeyboardButtonCallback(f"✅ Approve {event.sender_id}", f'approve_user_{event.sender_id}'.encode())]
+                            ]
+                        )
+                    except Exception:
+                        pass
+                await event.reply(
+                    "❗ Kamu belum diizinkan menggunakan bot ini.\nSilakan request akses ke admin.",
+                    buttons=request_access_keyboard()
+                )
+        return wrapper
+
+    async def try_edit(event, text, **kwargs):
+        try:
+            await event.edit(text, **kwargs)
+        except MessageNotModifiedError:
+            await event.answer()
+
+    # --- HANDLER MENU UTAMA & DASAR ---
     @bot.on(events.NewMessage(pattern='/start'))
     @authorized_only
     async def start_handler(event):
+        buttons = main_menu_keyboard()
+        if event.sender_id in ADMIN_USER_IDS:
+            buttons.append([KeyboardButtonCallback("⚙️ Admin Panel", b'admin_user_mgmt')])
         await event.reply(
             "**Selamat Datang di Bot Forwarder!**\n\nGunakan tombol di bawah untuk mengelola akun Anda.",
-            buttons=main_menu_keyboard()
+            buttons=buttons
         )
 
     @bot.on(events.CallbackQuery(data=b'main_menu'))
     @authorized_only
     async def main_menu_handler(event):
-        await try_edit(event, "**Menu Utama**\n\nSilakan pilih salah satu opsi:", buttons=main_menu_keyboard())
+        buttons = main_menu_keyboard()
+        if event.sender_id in ADMIN_USER_IDS:
+            buttons.append([KeyboardButtonCallback("⚙️ Admin Panel", b'admin_user_mgmt')])
+        await try_edit(event, "**Menu Utama**\n\nSilakan pilih salah satu opsi:", buttons=buttons)
 
     @bot.on(events.CallbackQuery(data=b'status'))
     @authorized_only
@@ -71,7 +93,6 @@ def setup_handlers(bot):
         await try_edit(event, status_text, buttons=main_menu_keyboard())
 
     # --- HANDLER WORKER (START/STOP) ---
-
     @bot.on(events.CallbackQuery(data=b'start_worker'))
     @authorized_only
     async def start_worker_handler(event):
@@ -89,7 +110,6 @@ def setup_handlers(bot):
         await status_handler(event)
 
     # --- HANDLER PEMILIHAN TARGET (INTERAKTIF DENGAN OPSI HAPUS) ---
-
     @bot.on(events.CallbackQuery(data=b'list_chats'))
     @authorized_only
     async def list_chats_for_target_handler(event):
@@ -145,7 +165,6 @@ def setup_handlers(bot):
         await list_chats_for_target_handler(event)
 
     # --- HANDLER MANAJEMEN PENGECUALIAN (INTERAKTIF) ---
-
     @bot.on(events.CallbackQuery(data=b'set_exclude'))
     @authorized_only
     async def set_exclude_menu_handler(event):
@@ -185,11 +204,9 @@ def setup_handlers(bot):
             config = await get_user_config(user_id)
             existing_ids = config.get('excluded_chat_ids', set())
             if not existing_ids: return await event.answer("Daftar pengecualian Anda kosong.", alert=True)
-            
             dialogs = await client.get_dialogs(limit=100)
             buttons = dynamic_chat_list_keyboard(dialogs, "excl_rem", existing_ids, show_all=False)
             buttons.append([KeyboardButtonCallback("⬅️ Kembali ke Menu Pengecualian", b'set_exclude')])
-            
             await try_edit(event, "Pilih chat untuk **dihapus** dari pengecualian:", buttons=buttons)
         except Exception as e: 
             logger.error(f"Error listing chats for exclusion (remove) for user {user_id}: {e}")
@@ -202,7 +219,6 @@ def setup_handlers(bot):
         config = await get_user_config(user_id)
         excluded_ids = config.get('excluded_chat_ids', set())
         if chat_id in excluded_ids: return await event.answer("Sudah ada di daftar.")
-        
         excluded_ids.add(chat_id)
         await update_user_config(user_id, 'excluded_chat_ids', excluded_ids)
         await event.answer(f"ID {chat_id} ditambahkan.", alert=False)
@@ -220,7 +236,6 @@ def setup_handlers(bot):
         await exclude_remove_list_handler(event) # Refresh
 
     # --- HANDLER OTENTIKASI & BANTUAN ---
-
     @bot.on(events.CallbackQuery(data=b'auth_menu'))
     @authorized_only
     async def auth_menu_handler(event):
@@ -251,5 +266,81 @@ def setup_handlers(bot):
         """
         await try_edit(event, help_text, buttons=back_to_main_menu_button())
 
-    # Daftarkan conversation handler dari file lain (untuk login)
+    # --- ADMIN PANEL ---
+    @bot.on(events.CallbackQuery(data=b'admin_user_mgmt'))
+    async def admin_user_mgmt_menu(event):
+        if event.sender_id not in ADMIN_USER_IDS:
+            await event.answer("Kamu bukan admin!", alert=True)
+            return
+        await event.edit("Kelola Allowed Users:", buttons=admin_user_management_keyboard())
+
+    @bot.on(events.CallbackQuery(data=b'admin_list_users'))
+    async def admin_list_users(event):
+        if event.sender_id not in ADMIN_USER_IDS:
+            await event.answer("Kamu bukan admin!", alert=True)
+            return
+        users = await get_allowed_users()
+        text = "Allowed users:\n\n" + "\n".join([f"`{uid}`" for uid in users]) if users else "Belum ada user yang diizinkan."
+        await event.edit(text, buttons=admin_user_management_keyboard())
+
+    @bot.on(events.CallbackQuery(data=b'admin_add_user'))
+    async def admin_add_user(event):
+        if event.sender_id not in ADMIN_USER_IDS:
+            await event.answer("Kamu bukan admin!", alert=True)
+            return
+        async with bot.conversation(event.sender_id, timeout=60) as conv:
+            await conv.send_message("Kirimkan USER ID Telegram yang ingin diizinkan:")
+            resp = await conv.get_response()
+            try:
+                uid = int(resp.text.strip())
+                await allow_user(uid)
+                await conv.send_message(f"✅ User `{uid}` berhasil diizinkan.", buttons=admin_user_management_keyboard())
+            except:
+                await conv.send_message("❌ Format USER ID tidak valid.", buttons=admin_user_management_keyboard())
+
+    @bot.on(events.CallbackQuery(data=b'admin_remove_user'))
+    async def admin_remove_user(event):
+        if event.sender_id not in ADMIN_USER_IDS:
+            await event.answer("Kamu bukan admin!", alert=True)
+            return
+        async with bot.conversation(event.sender_id, timeout=60) as conv:
+            await conv.send_message("Kirimkan USER ID Telegram yang ingin dihapus dari allowed user:")
+            resp = await conv.get_response()
+            try:
+                uid = int(resp.text.strip())
+                await disallow_user(uid)
+                await conv.send_message(f"✅ User `{uid}` sudah tidak diizinkan lagi.", buttons=admin_user_management_keyboard())
+            except:
+                await conv.send_message("❌ Format USER ID tidak valid.", buttons=admin_user_management_keyboard())
+
+    # --- HANDLER REQUEST & APPROVE USER BARU ---
+    @bot.on(events.CallbackQuery(data=b'request_access'))
+    async def request_access_handler(event):
+        for admin_id in ADMIN_USER_IDS:
+            try:
+                await bot.send_message(
+                    admin_id,
+                    f"🚩 User `{event.sender_id}` meminta akses ke bot.\nApprove user ini?",
+                    buttons=[
+                        [KeyboardButtonCallback(f"✅ Approve {event.sender_id}", f'approve_user_{event.sender_id}'.encode())]
+                    ]
+                )
+            except Exception:
+                pass
+        await event.edit("✅ Request akses sudah dikirim ke admin. Silakan tunggu approval.")
+
+    @bot.on(events.CallbackQuery(pattern=r'approve_user_(\d+)'))
+    async def approve_user_handler(event):
+        if event.sender_id not in ADMIN_USER_IDS:
+            await event.answer("Kamu bukan admin!", alert=True)
+            return
+        new_user_id = int(event.pattern_match.group(1).decode())
+        await allow_user(new_user_id)
+        try:
+            await bot.send_message(new_user_id, "✅ Kamu sudah di-approve admin, silakan gunakan bot.")
+        except Exception:
+            pass
+        await event.edit(f"User `{new_user_id}` sudah di-approve dan kini bisa akses bot.")
+
+    # --- DAFTARKAN CONVERSATION HANDLERS DARI FILE LAIN (UNTUK LOGIN) ---
     setup_conversation_handlers(bot)

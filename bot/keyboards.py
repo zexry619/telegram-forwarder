@@ -92,3 +92,11 @@ def back_to_main_menu_button():
     Berguna untuk pesan-pesan informasional.
     """
     return [[KeyboardButtonCallback("⬅️ Kembali ke Menu Utama", b'main_menu')]]
+
+def admin_user_management_keyboard():
+    return [
+        [KeyboardButtonCallback("👥 Lihat Allowed Users", b'admin_list_users')],
+        [KeyboardButtonCallback("➕ Tambah Allowed User", b'admin_add_user')],
+        [KeyboardButtonCallback("➖ Hapus Allowed User", b'admin_remove_user')],
+        [KeyboardButtonCallback("⬅️ Kembali ke Menu Utama", b'main_menu')]
+    ]

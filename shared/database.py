@@ -126,3 +126,22 @@ async def db_check_duplicate_by_content_hash(user_id: int, ch: str) -> str | Non
         async with db.execute(sql, (user_id, ch)) as c:
             r = await c.fetchone()
             return r[0] if r else None
+async def allow_user(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT OR IGNORE INTO users (user_id, status) VALUES (?, 'stopped')", (user_id,))
+        await db.commit()
+
+async def disallow_user(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+async def is_user_allowed(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            return await cursor.fetchone() is not None
+
+async def get_allowed_users():
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT user_id FROM users") as cursor:
+            return [row[0] for row in await cursor.fetchall()]

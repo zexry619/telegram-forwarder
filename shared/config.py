@@ -4,6 +4,9 @@ from dotenv import load_dotenv
 # Muat variabel dari file .env
 load_dotenv()
 
+# Di bagian paling atas
+ADMIN_USER_IDS = {int(uid) for uid in os.getenv("ADMIN_USER_IDS", "").split(",") if uid}
+
 # --- Telegram API ---
 API_ID = int(os.getenv('TELEGRAM_API_ID', 0))
 API_HASH = os.getenv('TELEGRAM_API_HASH', '')
