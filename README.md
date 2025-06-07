@@ -7,5 +7,6 @@ Aplikasi ini meneruskan berbagai media dari semua chat (kecuali yang Anda kecual
 - Pilihan target chat dan daftar pengecualian.
 - Filter tipe media yang diteruskan (foto, video, dokumen atau semua).
 - Otomatis menghindari duplikasi pesan.
+- Penjadwalan otomatis untuk menyalakan atau menghentikan worker pada jam tertentu.
 
 Semua pengaturan dapat dilakukan melalui menu bot setelah Anda menjalankan aplikasi.

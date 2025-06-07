@@ -15,7 +15,7 @@ logging.getLogger('telethon').setLevel(logging.WARNING)
 # --- Import dari modul proyek ---
 from shared.database import init_db
 from bot.handlers import setup_handlers
-from user.manager import startup_all_workers, shutdown_all_workers
+from user.manager import startup_all_workers, shutdown_all_workers, schedule_monitor
 
 # --- Import untuk auto-cleanup ---
 from utils.cleanup import cleanup_download_folder
@@ -49,8 +49,9 @@ async def main():
     # Startup all workers
     await startup_all_workers(bot)
 
-    # Start periodic cleanup task
+    # Start background tasks
     asyncio.create_task(periodic_cleanup())
+    asyncio.create_task(schedule_monitor(bot))
 
     logger.info("===== Bot is fully operational. Press Ctrl+C to stop. =====")
     await bot.run_until_disconnected()
