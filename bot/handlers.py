@@ -11,7 +11,7 @@ from shared.database import (
 from .keyboards import (
     main_menu_keyboard, auth_menu_keyboard, back_to_main_menu_button,
     exclude_menu_keyboard, dynamic_chat_list_keyboard, admin_user_management_keyboard,
-    media_filter_keyboard
+    media_filter_keyboard, schedule_menu_keyboard
 )
 from .conversations import setup_conversation_handlers
 from user.manager import (
@@ -273,6 +273,62 @@ def setup_handlers(bot):
         await update_user_config(event.sender_id, 'allowed_media_types', {'document'})
         await event.answer('Mengatur filter ke: hanya dokumen')
         await media_filter_menu_handler(event)
+
+    # --- HANDLER JADWAL OTOMATIS ---
+    @bot.on(events.CallbackQuery(data=b'schedule_menu'))
+    @authorized_only
+    async def schedule_menu_handler(event):
+        config = await get_user_config(event.sender_id)
+        start = config.get('start_time') or '-'
+        stop = config.get('stop_time') or '-'
+        text = f"⏰ **Jadwal Otomatis**\n\nWaktu mulai: `{start}`\nWaktu stop: `{stop}`"
+        await try_edit(event, text, buttons=schedule_menu_keyboard())
+
+    @bot.on(events.CallbackQuery(data=b'set_start_time'))
+    @authorized_only
+    async def set_start_time_handler(event):
+        async with bot.conversation(event.sender_id, timeout=60) as conv:
+            await conv.send_message("Kirim jam mulai (HH:MM), atau ketik batal:")
+            resp = await conv.get_response()
+            t = resp.text.strip()
+            if t.lower() == 'batal':
+                await conv.send_message("Dibatalkan.")
+            else:
+                try:
+                    import datetime
+                    datetime.datetime.strptime(t, "%H:%M")
+                    await update_user_config(event.sender_id, 'start_time', t)
+                    await conv.send_message(f"Jam mulai diatur ke {t}")
+                except ValueError:
+                    await conv.send_message("Format waktu salah. Gunakan HH:MM")
+        await schedule_menu_handler(event)
+
+    @bot.on(events.CallbackQuery(data=b'set_stop_time'))
+    @authorized_only
+    async def set_stop_time_handler(event):
+        async with bot.conversation(event.sender_id, timeout=60) as conv:
+            await conv.send_message("Kirim jam stop (HH:MM), atau ketik batal:")
+            resp = await conv.get_response()
+            t = resp.text.strip()
+            if t.lower() == 'batal':
+                await conv.send_message("Dibatalkan.")
+            else:
+                try:
+                    import datetime
+                    datetime.datetime.strptime(t, "%H:%M")
+                    await update_user_config(event.sender_id, 'stop_time', t)
+                    await conv.send_message(f"Jam stop diatur ke {t}")
+                except ValueError:
+                    await conv.send_message("Format waktu salah. Gunakan HH:MM")
+        await schedule_menu_handler(event)
+
+    @bot.on(events.CallbackQuery(data=b'clear_schedule'))
+    @authorized_only
+    async def clear_schedule_handler(event):
+        await update_user_config(event.sender_id, 'start_time', None)
+        await update_user_config(event.sender_id, 'stop_time', None)
+        await event.answer('Jadwal dinonaktifkan', alert=True)
+        await schedule_menu_handler(event)
 
     # --- HANDLER OTENTIKASI & BANTUAN ---
     @bot.on(events.CallbackQuery(data=b'auth_menu'))

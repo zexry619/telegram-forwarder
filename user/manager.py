@@ -158,3 +158,37 @@ async def shutdown_all_workers():
             if client.is_connected():
                 await client.disconnect()
     logger.info("All active sessions have been shut down.")
+
+async def schedule_monitor(bot_client):
+    import datetime
+    from shared.database import get_allowed_users
+
+    while True:
+        try:
+            user_ids = await get_allowed_users()
+            now = datetime.datetime.now().time()
+            for user_id in user_ids:
+                config = await get_user_config(user_id)
+                start_t = config.get('start_time')
+                stop_t = config.get('stop_time')
+                if not start_t or not stop_t:
+                    continue
+                try:
+                    s_start = datetime.datetime.strptime(start_t, "%H:%M").time()
+                    s_stop = datetime.datetime.strptime(stop_t, "%H:%M").time()
+                except ValueError:
+                    continue
+
+                if s_start < s_stop:
+                    active = s_start <= now < s_stop
+                else:
+                    active = now >= s_start or now < s_stop
+
+                status = await get_worker_status(user_id)
+                if active and status != 'running':
+                    await start_user_worker(user_id, bot_client)
+                elif not active and status == 'running':
+                    await stop_user_worker(user_id)
+        except Exception as e:
+            logger.error(f"Schedule monitor error: {e}")
+        await asyncio.sleep(60)

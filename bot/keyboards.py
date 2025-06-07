@@ -22,6 +22,9 @@ def main_menu_keyboard():
             KeyboardButtonCallback("🗂 Filter Media", b'set_media_filter')
         ],
         [
+            KeyboardButtonCallback("⏰ Jadwal Otomatis", b'schedule_menu')
+        ],
+        [
             KeyboardButtonCallback("🔐 Login / Logout", b'auth_menu'),
             KeyboardButtonCallback("❓ Bantuan", b'help')
         ]
@@ -113,5 +116,13 @@ def media_filter_keyboard(current: set):
         [KeyboardButtonCallback(mark("Hanya Foto", current == {'photo'}), b'media_filter_photo')],
         [KeyboardButtonCallback(mark("Hanya Video", current == {'video'}), b'media_filter_video')],
         [KeyboardButtonCallback(mark("Hanya Dokumen", current == {'document'}), b'media_filter_document')],
+        [KeyboardButtonCallback("⬅️ Kembali ke Menu Utama", b'main_menu')]
+    ]
+
+def schedule_menu_keyboard():
+    return [
+        [KeyboardButtonCallback("Atur Jam Mulai", b'set_start_time')],
+        [KeyboardButtonCallback("Atur Jam Stop", b'set_stop_time')],
+        [KeyboardButtonCallback("Nonaktifkan Jadwal", b'clear_schedule')],
         [KeyboardButtonCallback("⬅️ Kembali ke Menu Utama", b'main_menu')]
     ]
