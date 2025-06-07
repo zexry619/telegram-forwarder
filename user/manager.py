@@ -4,7 +4,6 @@ import asyncio
 import os
 import logging
 from telethon import TelegramClient
-from shared.config import API_ID, API_HASH, SESSIONS_DIR
 from shared.database import get_user_config, update_user_config, get_all_running_users
 from .worker import UserWorker
 from shared.config import API_ID, API_HASH, SESSIONS_DIR, get_telethon_proxy
@@ -21,6 +20,7 @@ async def get_client_for_user(user_id: int):
         client = session_obj.client if isinstance(session_obj, UserWorker) else session_obj
         if not client.is_connected():
             try:
+                client.set_proxy(proxy)
                 await client.connect()
                 if not client.is_connected(): return None # Gagal connect
                 client.me = await client.get_me()
@@ -32,7 +32,7 @@ async def get_client_for_user(user_id: int):
     session_path = os.path.join(SESSIONS_DIR, str(user_id))
     if os.path.exists(f"{session_path}.session"):
         try:
-            client = TelegramClient(session_path, API_ID, API_HASH)
+            client = TelegramClient(session_path, API_ID, API_HASH, proxy=proxy)
             await client.connect()
             if await client.is_user_authorized():
                 client.me = await client.get_me()
