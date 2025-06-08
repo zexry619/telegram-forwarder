@@ -32,18 +32,18 @@ def setup_handlers(bot):
             if event.sender_id in ADMIN_USER_IDS or await is_user_allowed(event.sender_id):
                 return await func(event)
             else:
-                # Notifikasi admin: kirim tombol approve
-                msg = f"❗ User `{event.sender_id}` meminta akses ke bot."
-                for admin_id in ADMIN_USER_IDS:
-                    try:
-                        await bot.send_message(
-                            admin_id, msg,
-                            buttons=[
-                                [KeyboardButtonCallback(f"✅ Approve {event.sender_id}", f'approve_user_{event.sender_id}'.encode())]
-                            ]
-                        )
-                    except Exception:
-                        pass
+#                # Notifikasi admin: kirim tombol approve
+#                msg = f"❗ User `{event.sender_id}` meminta akses ke bot."
+#                for admin_id in ADMIN_USER_IDS:
+#                    try:
+#                        await bot.send_message(
+#                            admin_id, msg,
+#                            buttons=[
+#                                [KeyboardButtonCallback(f"✅ Approve {event.sender_id}", f'approve_user_{event.sender_id}'.encode())]
+#                            ]
+#                        )
+#                    except Exception:
+#                        pass
                 await event.reply(
                     "❗ Kamu belum diizinkan menggunakan bot ini.\nSilakan request akses ke admin.",
                     buttons=request_access_keyboard()
