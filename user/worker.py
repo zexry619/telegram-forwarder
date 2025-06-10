@@ -116,8 +116,15 @@ class UserWorker:
             logger.info(f"[USER_ID: {self.user_id}] ✅ Directly forwarded MsgID: {event.message.id}")
             await db_record_message(self.user_id, message_key, {'chat_id': event.chat_id, 'message_id': event.message.id, 'chat_name': chat_name, 'media_type': media_type, 'fingerprint': fp, 'status': 'forwarded_directly'})
         except ChatForwardsRestrictedError:
-            logger.info(f"[USER_ID: {self.user_id}] 🚫 Direct forward restricted. Queuing for download.")
-            await self._queue.put(event)
+            logger.info(f"[USER_ID: {self.user_id}] 🚫 Direct forward restricted. Skipping.")
+            await db_record_message(self.user_id, message_key, {
+                'chat_id': event.chat_id,
+                'message_id': event.message.id,
+                'chat_name': chat_name,
+                'media_type': media_type,
+                'fingerprint': fp,
+                'status': 'skipped_forward_restricted'
+            })
         except Exception as e:
             if "target peer" in str(e).lower():
                 logger.error(f"[USER_ID: {self.user_id}] ⛔️ CRITICAL ERROR: Target chat ID {self.config['target_chat_id']} is invalid or I don't have access. Stopping worker.")
