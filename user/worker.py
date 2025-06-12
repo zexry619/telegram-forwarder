@@ -29,6 +29,15 @@ async def calculate_md5_hash(fp):
 async def calculate_image_hash(fp):
     try: return f"p_{str(imagehash.phash(Image.open(fp)))}_d_{str(imagehash.dhash(Image.open(fp)))}"
     except: return None
+
+async def calculate_thumbnail_md5(client, message):
+    try:
+        data = await client.download_media(message, file=bytes, thumb=-1)
+        if not data:
+            return None
+        return hashlib.md5(data).hexdigest()
+    except Exception:
+        return None
 def get_media_type_string(m):
     if isinstance(m, MessageMediaPhoto): return "photo"
     if isinstance(m, MessageMediaDocument):
@@ -107,17 +116,47 @@ class UserWorker:
                 return
 
             fp = await get_media_fingerprint(event.message)
+            thumb_hash = await calculate_thumbnail_md5(self.client, event.message)
             if await db_check_duplicate_by_fingerprint(self.user_id, fp):
                 logger.info(f"[USER_ID: {self.user_id}] ⏩ Skip (MsgID: {message_key}): Duplicate fingerprint.")
+                return
+            if thumb_hash and (dup_key := await db_check_duplicate_by_thumbnail_hash(self.user_id, thumb_hash)):
+                logger.info(f"[USER_ID: {self.user_id}] ⏩ Skip (MsgID: {message_key}): Duplicate thumbnail hash.")
+                await db_record_message(self.user_id, message_key, {
+                    'chat_id': event.chat_id,
+                    'message_id': event.message.id,
+                    'chat_name': chat_name,
+                    'media_type': media_type,
+                    'fingerprint': fp,
+                    'thumbnail_md5_hash': thumb_hash,
+                    'status': 'duplicate_thumbnail_hash',
+                    'is_duplicate_of_key': dup_key,
+                })
                 return
 
             logger.info(f"[USER_ID: {self.user_id}] ➡️ Attempting direct forward for MsgID: {event.message.id}")
             await self.client.forward_messages(self.config['target_chat_id'], event.message)
             logger.info(f"[USER_ID: {self.user_id}] ✅ Directly forwarded MsgID: {event.message.id}")
-            await db_record_message(self.user_id, message_key, {'chat_id': event.chat_id, 'message_id': event.message.id, 'chat_name': chat_name, 'media_type': media_type, 'fingerprint': fp, 'status': 'forwarded_directly'})
+            await db_record_message(self.user_id, message_key, {
+                'chat_id': event.chat_id,
+                'message_id': event.message.id,
+                'chat_name': chat_name,
+                'media_type': media_type,
+                'fingerprint': fp,
+                'thumbnail_md5_hash': thumb_hash,
+                'status': 'forwarded_directly'
+            })
         except ChatForwardsRestrictedError:
-            logger.info(f"[USER_ID: {self.user_id}] 🚫 Direct forward restricted. Queuing for download.")
-            await self._queue.put(event)
+            logger.info(f"[USER_ID: {self.user_id}] 🚫 Direct forward restricted. Skipping.")
+            await db_record_message(self.user_id, message_key, {
+                'chat_id': event.chat_id,
+                'message_id': event.message.id,
+                'chat_name': chat_name,
+                'media_type': media_type,
+                'fingerprint': fp,
+                'thumbnail_md5_hash': thumb_hash,
+                'status': 'skipped_forward_restricted'
+            })
         except Exception as e:
             if "target peer" in str(e).lower():
                 logger.error(f"[USER_ID: {self.user_id}] ⛔️ CRITICAL ERROR: Target chat ID {self.config['target_chat_id']} is invalid or I don't have access. Stopping worker.")
@@ -141,7 +180,19 @@ class UserWorker:
                     continue
                 logger.info(f"[USER_ID: {self.user_id}] 📥 Processing MsgID {event.message.id} from queue. Downloading...")
                 try:
-                    db_data = {'chat_id': event.chat_id, 'message_id': event.message.id, 'chat_name': chat_name, 'media_type': media_type, 'fingerprint': await get_media_fingerprint(event.message)}
+                    thumb_hash = await calculate_thumbnail_md5(self.client, event.message)
+                    db_data = {
+                        'chat_id': event.chat_id,
+                        'message_id': event.message.id,
+                        'chat_name': chat_name,
+                        'media_type': media_type,
+                        'fingerprint': await get_media_fingerprint(event.message),
+                        'thumbnail_md5_hash': thumb_hash,
+                    }
+                    if thumb_hash and (dup_key := await db_check_duplicate_by_thumbnail_hash(self.user_id, thumb_hash)):
+                        logger.info(f"[USER_ID: {self.user_id}] ⏩ Skip (MsgID: {event.message.id}): Duplicate thumbnail hash.")
+                        await db_record_message(self.user_id, message_key, {**db_data, 'status': 'duplicate_thumbnail_hash', 'is_duplicate_of_key': dup_key})
+                        continue
                     # Cek ukuran file sebelum diunduh jika informasinya tersedia
                     if getattr(getattr(event.message, 'file', None), 'size', 0) > MAX_UPLOAD_SIZE_BYTES:
                         logger.info(
