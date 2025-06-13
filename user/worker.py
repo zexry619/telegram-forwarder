@@ -1,34 +1,26 @@
 # user/worker.py
 
-import asyncio
-import os
-import hashlib
-import imagehash
 import logging
+import hashlib
+from io import BytesIO
 from PIL import Image, UnidentifiedImageError
+import imagehash
 from telethon import events
-from telethon.errors import ChatForwardsRestrictedError, FloodWaitError
+from telethon.errors import ChatForwardsRestrictedError
 from telethon.tl.types import (
     DocumentAttributeSticker, MessageMediaPhoto, MessageMediaDocument,
     DocumentAttributeVideo
 )
 from shared.database import (
-    db_record_message, db_check_message_exists, db_check_duplicate_by_fingerprint,
-    db_check_duplicate_by_thumbnail_hash, db_check_duplicate_by_image_hash,
-    db_check_duplicate_by_content_hash
+    db_record_message,
+    db_check_message_exists,
+    db_check_duplicate_by_fingerprint,
+    db_check_duplicate_by_thumbnail_hash,
+    db_check_duplicate_by_image_hash,
 )
-from shared.config import DOWNLOADS_DIR
-from shared.config import MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_MB
 
 logger = logging.getLogger(__name__)
 
-async def calculate_md5_hash(fp):
-    try:
-        h = hashlib.md5(); f=open(fp,'rb'); h.update(f.read()); f.close(); return h.hexdigest()
-    except: return None
-async def calculate_image_hash(fp):
-    try: return f"p_{str(imagehash.phash(Image.open(fp)))}_d_{str(imagehash.dhash(Image.open(fp)))}"
-    except: return None
 def get_media_type_string(m):
     if isinstance(m, MessageMediaPhoto): return "photo"
     if isinstance(m, MessageMediaDocument):
@@ -43,6 +35,18 @@ async def get_media_fingerprint(m):
         d = m.document; fp = [f"doc_{d.id}_{d.access_hash}",f"s{d.size}"]; [fp.extend([f"d{a.duration}",f"w{a.w}",f"h{a.h}"]) for a in d.attributes if isinstance(a,DocumentAttributeVideo)]; return "_".join(fp)
     return None
 
+async def calculate_thumbnail_hash_bytes(data: bytes) -> tuple[str | None, str | None]:
+    """Hitung MD5 dan image hash dari data thumbnail."""
+    if not data:
+        return None, None
+    md5 = hashlib.md5(data).hexdigest()
+    try:
+        img = Image.open(BytesIO(data))
+        ih = f"p_{imagehash.phash(img)}_d_{imagehash.dhash(img)}"
+    except Exception:
+        ih = None
+    return md5, ih
+
 class UserWorker:
     def __init__(self, user_id: int, client, config: dict, bot_client):
         self.user_id = user_id
@@ -50,10 +54,6 @@ class UserWorker:
         self.config = config
         self.bot_client = bot_client
         self.status = "initializing"
-        self._tasks = []
-        self._queue = asyncio.Queue(maxsize=50)
-        self.download_path = os.path.join(DOWNLOADS_DIR, str(self.user_id))
-        os.makedirs(self.download_path, exist_ok=True)
         # client.me seharusnya sudah diisi oleh manager sebelum worker dibuat
         if not hasattr(self.client, 'me') or not self.client.me:
             raise ValueError("Client 'me' attribute not set before creating worker.")
@@ -62,23 +62,17 @@ class UserWorker:
         # Tambahkan event handler HANYA saat worker benar-benar dimulai
         self.client.add_event_handler(self._new_message_handler, events.NewMessage(incoming=True))
         
-        # Mulai task-task latar belakang
-        for i in range(3):
-            self._tasks.append(asyncio.create_task(self._process_queue()))
-        
         # Ubah status menjadi running
         self.status = "running"
-        
+
         # Kirim feedback ke pengguna
-        logger.info(f"[USER_ID: {self.user_id}] Worker started with {len(self._tasks)} queue processors.")
+        logger.info(f"[USER_ID: {self.user_id}] Worker started.")
         await self.send_feedback("✅ Worker berhasil dimulai.")
 
     async def stop(self):
         self.status = "stopped"
         if self.client.is_connected():
             self.client.remove_event_handler(self._new_message_handler)
-        for task in self._tasks: task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
         logger.info(f"[USER_ID: {self.user_id}] Worker stopped.")
 
     async def send_feedback(self, message: str):
@@ -111,10 +105,54 @@ class UserWorker:
                 logger.info(f"[USER_ID: {self.user_id}] ⏩ Skip (MsgID: {message_key}): Duplicate fingerprint.")
                 return
 
+            # Ambil thumbnail terkecil untuk deteksi duplikasi
+            thumb_bytes = await self.client.download_media(event.message, file=bytes, thumb=0)
+            thumb_md5, img_hash = await calculate_thumbnail_hash_bytes(thumb_bytes)
+            dup_key = await db_check_duplicate_by_thumbnail_hash(self.user_id, thumb_md5)
+            if dup_key:
+                logger.info(f"[USER_ID: {self.user_id}] ⏩ Skip (MsgID: {message_key}): Duplicate thumbnail hash.")
+                await db_record_message(self.user_id, message_key, {
+                    'chat_id': event.chat_id,
+                    'message_id': event.message.id,
+                    'chat_name': chat_name,
+                    'media_type': media_type,
+                    'fingerprint': fp,
+                    'thumbnail_md5_hash': thumb_md5,
+                    'image_hash': img_hash,
+                    'status': 'duplicate_thumbnail_hash',
+                    'is_duplicate_of_key': dup_key,
+                })
+                return
+            if img_hash:
+                dup_key = await db_check_duplicate_by_image_hash(self.user_id, img_hash)
+                if dup_key:
+                    logger.info(f"[USER_ID: {self.user_id}] ⏩ Skip (MsgID: {message_key}): Duplicate image hash.")
+                    await db_record_message(self.user_id, message_key, {
+                        'chat_id': event.chat_id,
+                        'message_id': event.message.id,
+                        'chat_name': chat_name,
+                        'media_type': media_type,
+                        'fingerprint': fp,
+                        'thumbnail_md5_hash': thumb_md5,
+                        'image_hash': img_hash,
+                        'status': 'duplicate_image_hash',
+                        'is_duplicate_of_key': dup_key,
+                    })
+                    return
+
             logger.info(f"[USER_ID: {self.user_id}] ➡️ Attempting direct forward for MsgID: {event.message.id}")
             await self.client.forward_messages(self.config['target_chat_id'], event.message)
             logger.info(f"[USER_ID: {self.user_id}] ✅ Directly forwarded MsgID: {event.message.id}")
-            await db_record_message(self.user_id, message_key, {'chat_id': event.chat_id, 'message_id': event.message.id, 'chat_name': chat_name, 'media_type': media_type, 'fingerprint': fp, 'status': 'forwarded_directly'})
+            await db_record_message(self.user_id, message_key, {
+                'chat_id': event.chat_id,
+                'message_id': event.message.id,
+                'chat_name': chat_name,
+                'media_type': media_type,
+                'fingerprint': fp,
+                'thumbnail_md5_hash': thumb_md5,
+                'image_hash': img_hash,
+                'status': 'forwarded_directly'
+            })
         except ChatForwardsRestrictedError:
             logger.info(f"[USER_ID: {self.user_id}] 🚫 Direct forward restricted. Skipping.")
             await db_record_message(self.user_id, message_key, {
@@ -123,6 +161,8 @@ class UserWorker:
                 'chat_name': chat_name,
                 'media_type': media_type,
                 'fingerprint': fp,
+                'thumbnail_md5_hash': thumb_md5,
+                'image_hash': img_hash,
                 'status': 'skipped_forward_restricted'
             })
         except Exception as e:
@@ -131,76 +171,14 @@ class UserWorker:
                 await self.send_feedback(f"⛔️ Worker dihentikan! Target chat `{self.config['target_chat_id']}` tidak valid atau saya tidak punya akses.")
                 from user.manager import stop_user_worker; await stop_user_worker(self.user_id)
             else:
-                logger.warning(f"[USER_ID: {self.user_id}] ⚠️ Direct forward failed ({type(e).__name__}), queuing...")
-                await self._queue.put(event)
-    async def _process_queue(self):
-        while self.status == 'running':
-            try:
-                event = await self._queue.get()
-                message_key = f"{event.chat_id}_{event.message.id}"
-                file_path, db_data = None, {}
-                chat = await event.get_chat(); chat_name = getattr(chat,'title', f"Chat {event.chat_id}")
-                media_type = get_media_type_string(event.media)
-                allowed = self.config.get('allowed_media_types', set())
-                if allowed and media_type not in allowed:
-                    logger.info(f"[USER_ID: {self.user_id}] ⏩ Skip queued {media_type} not allowed.")
-                    self._queue.task_done()
-                    continue
-                logger.info(f"[USER_ID: {self.user_id}] 📥 Processing MsgID {event.message.id} from queue. Downloading...")
-                try:
-                    db_data = {'chat_id': event.chat_id, 'message_id': event.message.id, 'chat_name': chat_name, 'media_type': media_type, 'fingerprint': await get_media_fingerprint(event.message)}
-                    # Cek ukuran file sebelum diunduh jika informasinya tersedia
-                    if getattr(getattr(event.message, 'file', None), 'size', 0) > MAX_UPLOAD_SIZE_BYTES:
-                        logger.info(
-                            f"[USER_ID: {self.user_id}] Skip MsgID {event.message.id}: file melebihi batas.")
-                        await db_record_message(self.user_id, message_key, {
-                            **db_data, 'status': 'size_limit_exceeded_before_download'
-                        })
-                        await self.send_feedback(
-                            f"Pesan dari {chat_name} dilewati karena ukurannya di atas {MAX_UPLOAD_SIZE_MB} MB.")
-                        continue
-                    file_path = await self.client.download_media(event.message, file=self.download_path)
-                    if not file_path: raise ValueError("Download failed")
-                    logger.info(f"[USER_ID: {self.user_id}] 📥 Downloaded: {os.path.basename(file_path)}")
-
-                    # Jika ukuran file tidak diketahui sebelumnya, cek setelah diunduh
-                    if os.path.getsize(file_path) > MAX_UPLOAD_SIZE_BYTES:
-                        logger.info(
-                            f"[USER_ID: {self.user_id}] File {file_path} melebihi batas.")
-                        db_data['status'] = 'size_limit_exceeded_after_download'
-                        await db_record_message(self.user_id, message_key, db_data)
-                        await self.send_feedback(
-                            f"File '{os.path.basename(file_path)}' lebih besar dari {MAX_UPLOAD_SIZE_MB} MB, tidak diupload.")
-                        continue
-
-                    content_hash = await calculate_md5_hash(file_path)
-                    if await db_check_duplicate_by_content_hash(self.user_id, content_hash):
-                        logger.info(f"[USER_ID: {self.user_id}] ⏩ Skip (MsgID: {event.message.id}): Duplicate content hash.")
-                        db_data.update({'status': 'duplicate_content_hash', 'content_hash': content_hash}); await db_record_message(self.user_id, message_key, db_data)
-                        continue
-                    db_data['content_hash'] = content_hash
-                    
-                    if media_type == 'photo':
-                        image_hash = await calculate_image_hash(file_path)
-                        if await db_check_duplicate_by_image_hash(self.user_id, image_hash):
-                            logger.info(f"[USER_ID: {self.user_id}] ⏩ Skip (MsgID: {event.message.id}): Duplicate image hash.")
-                            db_data.update({'status': 'duplicate_image_hash', 'image_hash': image_hash}); await db_record_message(self.user_id, message_key, db_data)
-                            continue
-                        db_data['image_hash'] = image_hash
-
-                    caption = f"Forwarded from: **{chat_name}**\n\n{event.message.text or ''}".strip()
-                    logger.info(f"[USER_ID: {self.user_id}] 📤 Uploading MsgID {event.message.id}...")
-                    await self.client.send_file(self.config['target_chat_id'], file_path, caption=caption, parse_mode='md')
-                    logger.info(f"[USER_ID: {self.user_id}] ✅ Uploaded successfully.")
-                    db_data['status'] = 'forwarded_uploaded'; await db_record_message(self.user_id, message_key, db_data)
-
-                except FloodWaitError as e:
-                    logger.warning(f"[USER_ID: {self.user_id}] ⏱️ FloodWait in queue: {e.seconds}s. Re-queueing.")
-                    await asyncio.sleep(e.seconds); await self._queue.put(event)
-                except Exception as e:
-                    error_msg = f"Failed to process MsgID {message_key}: {type(e).__name__}"; logger.error(f"[USER_ID: {self.user_id}] ❌ {error_msg}", exc_info=True)
-                    await self.send_feedback(error_msg); db_data['status'] = f"error: {str(e)[:100]}"; await db_record_message(self.user_id, message_key, db_data)
-                finally:
-                    if file_path and os.path.exists(file_path): os.remove(file_path)
-                    self._queue.task_done()
-            except asyncio.CancelledError: break
+                logger.warning(f"[USER_ID: {self.user_id}] ⚠️ Direct forward failed ({type(e).__name__}). Skipping.")
+                await db_record_message(self.user_id, message_key, {
+                    'chat_id': event.chat_id,
+                    'message_id': event.message.id,
+                    'chat_name': chat_name,
+                    'media_type': media_type,
+                    'fingerprint': fp,
+                    'thumbnail_md5_hash': thumb_md5,
+                    'image_hash': img_hash,
+                    'status': f'error: {type(e).__name__}'
+                })
