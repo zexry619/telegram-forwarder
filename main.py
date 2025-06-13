@@ -3,7 +3,7 @@ import os
 import logging
 import sys
 from telethon import TelegramClient
-from shared.config import BOT_TOKEN, SESSIONS_DIR, DOWNLOADS_DIR, API_ID, API_HASH, get_telethon_proxy
+from shared.config import BOT_TOKEN, SESSIONS_DIR, API_ID, API_HASH, get_telethon_proxy
 
 # --- KONFIGURASI LOGGING ---
 log_format = '%(asctime)s - %(name)-18s - %(levelname)-8s - %(message)s'
@@ -16,24 +16,13 @@ logging.getLogger('telethon').setLevel(logging.WARNING)
 from shared.database import init_db
 from bot.handlers import setup_handlers
 from user.manager import startup_all_workers, shutdown_all_workers, schedule_monitor
-
-# --- Import untuk auto-cleanup ---
-from utils.cleanup import cleanup_download_folder
-
 # --- Inisialisasi bot utama ---
 proxy = get_telethon_proxy()
 bot = TelegramClient('bot_controller_session', API_ID, API_HASH, proxy=proxy)
 
-async def periodic_cleanup():
-    """Auto-cleanup download folder setiap jam, hapus file lebih dari 24 jam."""
-    while True:
-        await cleanup_download_folder(DOWNLOADS_DIR, max_age_hours=24)
-        await asyncio.sleep(3600)  # jalankan tiap jam
-
 async def main():
     logger.info("Starting up the bot...")
     os.makedirs(SESSIONS_DIR, exist_ok=True)
-    os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
     # Inisialisasi Database
     await init_db()
@@ -50,7 +39,6 @@ async def main():
     await startup_all_workers(bot)
 
     # Start background tasks
-    asyncio.create_task(periodic_cleanup())
     asyncio.create_task(schedule_monitor(bot))
 
     logger.info("===== Bot is fully operational. Press Ctrl+C to stop. =====")
