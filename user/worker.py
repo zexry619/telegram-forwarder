@@ -17,6 +17,7 @@ from shared.database import (
     db_check_duplicate_by_fingerprint,
     db_check_duplicate_by_thumbnail_hash,
     db_check_duplicate_by_image_hash,
+    db_record_message, db_check_message_exists, db_check_duplicate_by_fingerprint
 )
 
 logger = logging.getLogger(__name__)
