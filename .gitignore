@@ -1,0 +1,9 @@
+sessions/
+*.session
+*.session-journal
+db/
+*.sqlite
+downloads/
+.env
+__pycache__/
+**/__pycache__/

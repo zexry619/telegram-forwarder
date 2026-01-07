@@ -1,0 +1,5 @@
+telethon
+python-dotenv
+aiosqlite
+Pillow
+imagehash
