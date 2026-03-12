@@ -4,7 +4,7 @@ import asyncio
 import os
 import logging
 from telethon import TelegramClient
-from shared.database import get_user_config, update_user_config, get_all_running_users
+from shared.database import get_user_config, update_user_config, get_all_running_users, get_user_routes
 from .worker import UserWorker
 from shared.config import API_ID, API_HASH, SESSIONS_DIR, get_telethon_proxy
 
@@ -70,8 +70,10 @@ async def start_user_worker(user_id: int, bot_client):
         
     # 2. Persiapan
     config = await get_user_config(user_id)
-    if not config.get('target_chat_id'):
-        return False, "❌ Gagal: Target chat belum diatur."
+    routes = await get_user_routes(user_id, enabled_only=True)
+    routes_with_target = [route for route in routes if route.get('target_chat_id')]
+    if not routes_with_target:
+        return False, "❌ Gagal: Belum ada route aktif yang punya target."
         
     client = await get_client_for_user(user_id)
     if not client:
@@ -80,7 +82,7 @@ async def start_user_worker(user_id: int, bot_client):
         
     # 3. Buat dan jalankan worker
     try:
-        worker = UserWorker(user_id, client, config, bot_client)
+        worker = UserWorker(user_id, client, config, routes, bot_client)
         ACTIVE_SESSIONS[user_id] = worker
         
         await worker.start() # Tunggu start selesai
@@ -97,6 +99,14 @@ async def start_user_worker(user_id: int, bot_client):
         if user_id in ACTIVE_SESSIONS:
             ACTIVE_SESSIONS[user_id] = client
         return False, error_msg
+
+
+async def refresh_user_worker_routes(user_id: int):
+    if user_id not in ACTIVE_SESSIONS or not isinstance(ACTIVE_SESSIONS[user_id], UserWorker):
+        return
+    worker = ACTIVE_SESSIONS[user_id]
+    worker.config = await get_user_config(user_id)
+    await worker.reload_routes(await get_user_routes(user_id, enabled_only=True))
 
 async def stop_user_worker(user_id: int):
     logger.info(f"Attempting to stop worker for user {user_id}...")

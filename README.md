@@ -4,13 +4,29 @@ Aplikasi ini meneruskan berbagai media dari semua chat (kecuali yang Anda kecual
 
 ## Fitur Utama
 - Login dan manajemen sesi akun Telegram.
-- Pilihan target chat dan daftar pengecualian.
+- Default route untuk mode lama: satu target utama plus pengecualian.
+- Multi-route: satu akun bisa punya banyak aturan sumber -> tujuan yang berbeda.
 - Filter tipe media yang diteruskan (foto, video, dokumen atau semua).
 - Otomatis menghindari duplikasi pesan.
 - Penjadwalan otomatis untuk menyalakan atau menghentikan worker pada jam tertentu.
-- Perintah `/migrasi` untuk menyalin media dari satu grup/channel ke grup/channel lain (fallback re-upload bila forward dibatasi).
+- Menu `Migrasi Media` di dalam bot untuk menyalin media dari satu grup/channel ke grup/channel lain (fallback re-upload bila forward dibatasi).
 
 Semua pengaturan dapat dilakukan melalui menu bot setelah Anda menjalankan aplikasi.
+
+## Alur Pengguna Baru
+
+- Ketik `/start` ke bot.
+- Jika akun Telegram belum pernah login, bot akan menampilkan onboarding dan mewajibkan login terlebih dahulu.
+- Masukkan nomor Telegram, lalu kode verifikasi dengan format `1_2_3_4_5`.
+- Jika akun memakai 2FA, masukkan password Telegram Anda.
+- Setelah login berhasil, semua fitur utama tersedia dari satu menu: default route, kelola routes, migrasi, pengaturan, lalu jalankan worker.
+
+## Multi-Route
+
+- `Default Route` dipakai untuk kompatibilitas dengan flow lama.
+- Menu `Kelola Routes` dipakai untuk membuat aturan tambahan.
+- Setiap route bisa punya nama sendiri, sumber, tujuan, filter media multi-pilihan, daftar pengecualian, opsi re-upload, dan status aktif/nonaktif sendiri.
+- Worker akan mengecek semua route aktif dan menjalankan route yang cocok dengan pesan masuk.
 
 ## Instalasi
 
@@ -74,12 +90,14 @@ Catatan: Cache tersimpan di folder `downloads/<user_id>`. File yang dipakai untu
 
 ## Migrasi Media Antar Channel/Grup
 
-- Jalankan perintah `/migrasi` di chat bot.
-- Pilih sumber (grup/channel) lalu pilih tujuan.
+- Dari menu utama bot, klik `Migrasi Media`.
+- Pilih sumber (grup/channel/`Saved Messages`) lalu pilih tujuan.
 - Masukkan limit jumlah pesan yang ingin disalin (hanya pesan yang memiliki media akan diproses). Ketik `semua` untuk tanpa batas.
 - Bot akan memproses dari pesan paling lama ke terbaru, mencoba forward langsung dulu, dan jika forward dibatasi serta opsi re-upload aktif di Pengaturan, bot akan mengunduh dan mengunggah ulang media ke tujuan.
 - Progres akan dikirimkan berkala di chat.
 
 Catatan:
+- Perintah `/migrasi` masih didukung sebagai alias, tetapi pengguna normal tidak perlu memakainya lagi.
+
 - Migrasi memakai filter media pengguna jika telah disetel di menu Pengaturan (mis. hanya foto/video/dokumen).
 - Deteksi duplikasi tetap aktif untuk menghindari unggahan ganda.

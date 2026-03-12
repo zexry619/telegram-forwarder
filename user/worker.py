@@ -1,37 +1,43 @@
 # user/worker.py
 
-import logging
+import asyncio
 import hashlib
-from io import BytesIO
+import logging
 import os
-from PIL import Image, UnidentifiedImageError
+from io import BytesIO
+
 import imagehash
-from telethon import events
-from telethon.errors import ChatForwardsRestrictedError
-from shared.config import MAX_UPLOAD_SIZE_BYTES, DOWNLOADS_DIR
 from PIL import Image
-from telethon.tl.types import (
-    DocumentAttributeSticker, MessageMediaPhoto, MessageMediaDocument,
-    DocumentAttributeVideo, DocumentAttributeFilename
-)
+from telethon import events
 from telethon import utils as tg_utils
+from telethon.errors import ChatForwardsRestrictedError
+from telethon.tl.types import (
+    DocumentAttributeFilename,
+    DocumentAttributeSticker,
+    DocumentAttributeVideo,
+    MessageMediaDocument,
+    MessageMediaPhoto,
+)
+
+from shared.config import DOWNLOADS_DIR, LIVE_REUPLOAD_CONCURRENCY, MAX_UPLOAD_SIZE_BYTES
+from shared.database import (
+    db_check_duplicate_by_content_hash,
+    db_check_duplicate_by_fingerprint,
+    db_check_duplicate_by_image_hash,
+    db_check_duplicate_by_thumbnail_hash,
+    db_check_message_exists,
+    db_record_message,
+)
+from shared.telegram import resolve_chat_peer
 
 try:
     from FastTelethon import download_file as ft_download_file, upload_file as ft_upload_file
     HAS_FAST = True
 except Exception:
     HAS_FAST = False
-from shared.database import (
-    db_record_message,
-    db_check_message_exists,
-    db_check_duplicate_by_fingerprint,
-    db_check_duplicate_by_thumbnail_hash,
-    db_check_duplicate_by_image_hash,
-    db_check_duplicate_by_content_hash,
-    db_record_message, db_check_message_exists, db_check_duplicate_by_fingerprint
-)
 
 logger = logging.getLogger(__name__)
+
 
 def _prepare_thumb_jpeg(data: bytes) -> bytes | None:
     if not data:
@@ -39,72 +45,94 @@ def _prepare_thumb_jpeg(data: bytes) -> bytes | None:
     try:
         img = Image.open(BytesIO(data)).convert('RGB')
         img.thumbnail((320, 320))
-        for q in (85, 75, 65, 55):
+        for quality in (85, 75, 65, 55):
             buf = BytesIO()
-            img.save(buf, format='JPEG', quality=q, optimize=True)
-            b = buf.getvalue()
-            if len(b) <= 200 * 1024:
-                return b
-        return b
+            img.save(buf, format='JPEG', quality=quality, optimize=True)
+            payload = buf.getvalue()
+            if len(payload) <= 200 * 1024:
+                return payload
+        return payload
     except Exception:
         return None
 
-def get_media_type_string(m):
-    if isinstance(m, MessageMediaPhoto): return "photo"
-    if isinstance(m, MessageMediaDocument):
-        if hasattr(m.document, 'mime_type') and m.document.mime_type.startswith('video/'): return "video"
+
+def get_media_type_string(media):
+    if isinstance(media, MessageMediaPhoto):
+        return "photo"
+    if isinstance(media, MessageMediaDocument):
+        if hasattr(media.document, 'mime_type') and media.document.mime_type.startswith('video/'):
+            return "video"
     return "document"
-def is_valid_media(m):
-    if not m or (hasattr(m, 'document') and any(isinstance(a, DocumentAttributeSticker) for a in m.document.attributes)): return False
-    return isinstance(m, (MessageMediaPhoto, MessageMediaDocument))
-async def get_media_fingerprint(m):
-    if isinstance(m, MessageMediaPhoto) and hasattr(m, 'photo'): return f"photo_{m.photo.id}_{m.photo.access_hash}"
-    if isinstance(m, MessageMediaDocument) and hasattr(m, 'document'):
-        d = m.document; fp = [f"doc_{d.id}_{d.access_hash}",f"s{d.size}"]; [fp.extend([f"d{a.duration}",f"w{a.w}",f"h{a.h}"]) for a in d.attributes if isinstance(a,DocumentAttributeVideo)]; return "_".join(fp)
+
+
+def is_valid_media(media):
+    if not media:
+        return False
+    if hasattr(media, 'document') and any(isinstance(attr, DocumentAttributeSticker) for attr in media.document.attributes):
+        return False
+    return isinstance(media, (MessageMediaPhoto, MessageMediaDocument))
+
+
+async def get_media_fingerprint(media):
+    if isinstance(media, MessageMediaPhoto) and hasattr(media, 'photo'):
+        return f"photo_{media.photo.id}_{media.photo.access_hash}"
+    if isinstance(media, MessageMediaDocument) and hasattr(media, 'document'):
+        doc = media.document
+        fingerprint = [f"doc_{doc.id}_{doc.access_hash}", f"s{doc.size}"]
+        for attr in doc.attributes:
+            if isinstance(attr, DocumentAttributeVideo):
+                fingerprint.extend([f"d{attr.duration}", f"w{attr.w}", f"h{attr.h}"])
+        return "_".join(fingerprint)
     return None
 
+
 async def calculate_thumbnail_hash_bytes(data: bytes) -> tuple[str | None, str | None]:
-    """Hitung MD5 dan image hash dari data thumbnail."""
     if not data:
         return None, None
     md5 = hashlib.md5(data).hexdigest()
     try:
         img = Image.open(BytesIO(data))
-        ih = f"p_{imagehash.phash(img)}_d_{imagehash.dhash(img)}"
+        image_hash = f"p_{imagehash.phash(img)}_d_{imagehash.dhash(img)}"
     except Exception:
-        ih = None
-    return md5, ih
+        image_hash = None
+    return md5, image_hash
+
 
 class UserWorker:
-    def __init__(self, user_id: int, client, config: dict, bot_client):
+    def __init__(self, user_id: int, client, config: dict, routes: list[dict], bot_client):
         self.user_id = user_id
         self.client = client
         self.config = config
+        self.routes = routes
         self.bot_client = bot_client
         self.status = "initializing"
-        # client.me seharusnya sudah diisi oleh manager sebelum worker dibuat
+        self.reupload_semaphore = asyncio.Semaphore(max(1, int(LIVE_REUPLOAD_CONCURRENCY or 1)))
         if not hasattr(self.client, 'me') or not self.client.me:
             raise ValueError("Client 'me' attribute not set before creating worker.")
+
+    async def reload_routes(self, routes: list[dict]):
+        self.routes = routes
+        logger.info(f"[USER_ID: {self.user_id}] Reloaded {len(routes)} route(s).")
 
     def _try_delete_cache(self, cached_path: str | None):
         if not cached_path:
             return
         try:
             base_dir = os.path.abspath(os.path.join(DOWNLOADS_DIR, str(self.user_id)))
-            p = os.path.abspath(cached_path)
-            if p.startswith(base_dir) and os.path.exists(p):
-                os.remove(p)
-                logger.info(f"[USER_ID: {self.user_id}] 🗑️ Deleted cache {p}")
+            path = os.path.abspath(cached_path)
+            if path.startswith(base_dir) and os.path.exists(path):
+                os.remove(path)
+                logger.info(f"[USER_ID: {self.user_id}] Deleted cache {path}")
         except Exception:
             pass
 
     def _sha256_file(self, path: str) -> str | None:
         try:
-            h = hashlib.sha256()
-            with open(path, 'rb') as f:
-                for chunk in iter(lambda: f.read(1024 * 1024), b''):
-                    h.update(chunk)
-            return h.hexdigest()
+            digest = hashlib.sha256()
+            with open(path, 'rb') as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                    digest.update(chunk)
+            return digest.hexdigest()
         except Exception:
             return None
 
@@ -114,15 +142,21 @@ class UserWorker:
         except Exception:
             return None
 
-    async def start(self):
-        # Tambahkan event handler HANYA saat worker benar-benar dimulai
-        self.client.add_event_handler(self._new_message_handler, events.NewMessage(incoming=True))
-        
-        # Ubah status menjadi running
-        self.status = "running"
+    def _build_unique_cache_name(self, event, preferred_name: str | None = None, fallback_ext: str = "") -> str:
+        safe_name = os.path.basename(preferred_name) if preferred_name else ""
+        if os.altsep:
+            safe_name = safe_name.replace(os.altsep, "_")
+        safe_name = safe_name.replace(os.sep, "_")
+        if not safe_name:
+            safe_name = f"media{fallback_ext}"
+        return f"{event.chat_id}_{event.message.id}_{safe_name}"
 
-        # Kirim feedback ke pengguna
-        logger.info(f"[USER_ID: {self.user_id}] Worker started.")
+    async def start(self):
+        self.client.add_event_handler(self._new_message_handler, events.NewMessage(incoming=True))
+        self.status = "running"
+        logger.info(
+            f"[USER_ID: {self.user_id}] Worker started with {len(self.routes)} route(s), reupload concurrency={self.reupload_semaphore._value}."
+        )
         await self.send_feedback("✅ Worker berhasil dimulai.")
 
     async def stop(self):
@@ -134,337 +168,424 @@ class UserWorker:
     async def send_feedback(self, message: str):
         try:
             await self.bot_client.send_message(self.user_id, f"ℹ️ **Notifikasi Worker:**\n{message}")
-        except: pass
+        except Exception:
+            pass
+
+    def _matching_routes(self, event) -> list[dict]:
+        media_type = get_media_type_string(event.message.media)
+        matched = []
+        for route in self.routes:
+            if not route.get('enabled') or not route.get('target_chat_id'):
+                continue
+            source_chat_id = route.get('source_chat_id')
+            if source_chat_id is not None and event.chat_id != source_chat_id:
+                continue
+            if source_chat_id is None and event.chat_id in route.get('excluded_chat_ids', set()):
+                continue
+            if event.chat_id == route.get('target_chat_id'):
+                continue
+            allowed = route.get('allowed_media_types', set())
+            if allowed and media_type not in allowed:
+                continue
+            matched.append(route)
+        return matched
+
+    async def _build_shared_message_context(self, event) -> dict:
+        media_type = get_media_type_string(event.message.media)
+        chat = await event.get_chat()
+        chat_name = getattr(chat, 'title', getattr(chat, 'first_name', f"Chat {event.chat_id}"))
+        message_key = f"{event.chat_id}_{event.message.id}"
+        fingerprint = await get_media_fingerprint(event.message.media)
+        try:
+            thumb_bytes = await self.client.download_media(event.message, file=bytes, thumb=0)
+        except Exception:
+            thumb_bytes = None
+        thumb_md5, img_hash = await calculate_thumbnail_hash_bytes(thumb_bytes)
+        return {
+            'media_type': media_type,
+            'chat_name': chat_name,
+            'message_key': message_key,
+            'fingerprint': fingerprint,
+            'thumb_bytes': thumb_bytes,
+            'thumb_md5': thumb_md5,
+            'img_hash': img_hash,
+            'reupload_payload': None,
+        }
+
+    async def _cleanup_shared_context(self, shared_ctx: dict):
+        payload = (shared_ctx or {}).get('reupload_payload') or {}
+        self._try_delete_cache(payload.get('cached_path'))
+
+    async def _prepare_reupload_payload(self, event, media_type: str, shared_ctx: dict) -> dict:
+        if shared_ctx.get('reupload_payload') is not None:
+            return shared_ctx['reupload_payload']
+
+        raw_size = None
+        if hasattr(event.message, 'file') and getattr(event.message, 'file', None):
+            try:
+                raw_size = event.message.file.size
+            except Exception:
+                raw_size = None
+        if raw_size and MAX_UPLOAD_SIZE_BYTES and raw_size > MAX_UPLOAD_SIZE_BYTES:
+            payload = {'status': 'skipped_reupload_file_too_large'}
+            shared_ctx['reupload_payload'] = payload
+            return payload
+
+        caption = (event.message.message or '').strip() or None
+        user_dir = os.path.join(DOWNLOADS_DIR, str(self.user_id))
+        os.makedirs(user_dir, exist_ok=True)
+
+        cached_path = None
+        try:
+            if HAS_FAST and isinstance(event.message.media, MessageMediaDocument) and getattr(event.message.media, 'document', None):
+                try:
+                    original_name = None
+                    for attr in (event.message.media.document.attributes or []):
+                        if isinstance(attr, DocumentAttributeFilename):
+                            original_name = attr.file_name
+                            break
+                    filename = self._build_unique_cache_name(
+                        event,
+                        preferred_name=original_name,
+                        fallback_ext='.mp4' if media_type == 'video' else '',
+                    )
+                    temp_path = os.path.join(user_dir, filename)
+                    with open(temp_path, 'wb') as out:
+                        await ft_download_file(self.client, event.message.media.document, out)
+                    cached_path = temp_path
+                except Exception as e:
+                    logger.warning(f"[USER_ID: {self.user_id}] Fast download failed: {e}")
+                    cached_path = None
+            if not cached_path:
+                downloaded = await self.client.download_media(event.message, file=user_dir)
+                if isinstance(downloaded, str):
+                    target_name = self._build_unique_cache_name(event, preferred_name=os.path.basename(downloaded))
+                    target_path = os.path.join(user_dir, target_name)
+                    if os.path.abspath(downloaded) != os.path.abspath(target_path):
+                        try:
+                            os.replace(downloaded, target_path)
+                            downloaded = target_path
+                        except Exception:
+                            pass
+                cached_path = downloaded
+        except Exception:
+            data = await self.client.download_media(event.message, file=bytes)
+            if not data:
+                payload = {'status': 'skipped_protected_content'}
+                shared_ctx['reupload_payload'] = payload
+                return payload
+            if MAX_UPLOAD_SIZE_BYTES and len(data) > MAX_UPLOAD_SIZE_BYTES:
+                payload = {'status': 'skipped_reupload_over_limit'}
+                shared_ctx['reupload_payload'] = payload
+                return payload
+            filename = self._build_unique_cache_name(event, fallback_ext='.bin')
+            cached_path = os.path.join(user_dir, filename)
+            with open(cached_path, 'wb') as handle:
+                handle.write(data)
+
+        file_to_send = cached_path
+        content_hash = self._sha256_file(file_to_send) if isinstance(file_to_send, str) else None
+
+        send_kwargs = {'caption': caption}
+        if shared_ctx.get('thumb_bytes') and media_type != 'video':
+            normalized_thumb = _prepare_thumb_jpeg(shared_ctx['thumb_bytes'])
+            if normalized_thumb:
+                send_kwargs['thumb'] = normalized_thumb
+
+        attrs = []
+        mime_type = None
+        out_name = None
+        if isinstance(event.message.media, MessageMediaDocument) and getattr(event.message.media, 'document', None):
+            mime_type = event.message.media.document.mime_type
+            for attr in (event.message.media.document.attributes or []):
+                if isinstance(attr, DocumentAttributeFilename):
+                    out_name = attr.file_name
+                if isinstance(attr, DocumentAttributeVideo):
+                    attrs.append(
+                        DocumentAttributeVideo(
+                            duration=getattr(attr, 'duration', None),
+                            w=getattr(attr, 'w', None),
+                            h=getattr(attr, 'h', None),
+                            supports_streaming=True,
+                        )
+                    )
+            if out_name:
+                attrs.append(DocumentAttributeFilename(out_name))
+        if media_type == 'video' and (not mime_type or not mime_type.startswith('video/')):
+            mime_type = 'video/mp4'
+        if not attrs and isinstance(file_to_send, str):
+            inferred_attrs, inferred_mime = tg_utils.get_attributes(file_to_send)
+            attrs = inferred_attrs
+            mime_type = mime_type or inferred_mime
+
+        payload = {
+            'status': 'ready',
+            'cached_path': cached_path,
+            'file_to_send': file_to_send,
+            'content_hash': content_hash,
+            'send_kwargs': send_kwargs,
+            'attrs': attrs or None,
+            'mime_type': mime_type,
+            'force_document': (media_type == 'document'),
+        }
+        shared_ctx['reupload_payload'] = payload
+        return payload
 
     async def _new_message_handler(self, event):
-        if self.status != 'running' or not is_valid_media(event.message.media): return
-        if event.out or event.chat_id in self.config['excluded_chat_ids'] or event.chat_id == self.config['target_chat_id']: return
-
-        media_type = get_media_type_string(event.message.media)
-        allowed = self.config.get('allowed_media_types', set())
-        if allowed and media_type not in allowed:
-            logger.info(f"[USER_ID: {self.user_id}] ⏩ Skip {media_type} not allowed.")
+        if self.status != 'running' or event.out or not is_valid_media(event.message.media):
             return
 
+        routes = self._matching_routes(event)
+        if not routes:
+            return
+
+        shared_ctx = None
         try:
-            chat = await event.get_chat()
-            chat_name = getattr(chat, 'title', getattr(chat, 'first_name', f"Chat {event.chat_id}"))
-            logger.info(f"[USER_ID: {self.user_id}] 🆕 New {media_type} from '{chat_name}' (MsgID: {event.message.id})")
+            shared_ctx = await self._build_shared_message_context(event)
+            for route in routes:
+                try:
+                    await self._process_route(event, route, shared_ctx)
+                except Exception as e:
+                    logger.warning(
+                        f"[USER_ID: {self.user_id}][route:{route.get('id')}] Unexpected route error: {type(e).__name__}: {e}"
+                    )
+        finally:
+            if shared_ctx:
+                await self._cleanup_shared_context(shared_ctx)
 
-            message_key = f"{event.chat_id}_{event.message.id}"
-            if await db_check_message_exists(self.user_id, message_key):
-                logger.info(f"[USER_ID: {self.user_id}] ⏩ Skip (MsgID: {message_key}): Already in DB.")
-                return
+    async def _process_route(self, event, route: dict, shared_ctx: dict):
+        media_type = shared_ctx['media_type']
+        route_id = route['id']
+        route_name = route.get('name') or f"Route {route_id}"
+        target_peer = resolve_chat_peer(self.client, route['target_chat_id'])
+        chat_name = shared_ctx['chat_name']
+        message_key = shared_ctx['message_key']
 
-            fp = await get_media_fingerprint(event.message)
-            if await db_check_duplicate_by_fingerprint(self.user_id, fp):
-                logger.info(f"[USER_ID: {self.user_id}] ⏩ Skip (MsgID: {message_key}): Duplicate fingerprint.")
-                return
+        logger.info(
+            f"[USER_ID: {self.user_id}][route:{route_id}] New {media_type} from '{chat_name}' (MsgID: {event.message.id})"
+        )
 
-            # Ambil thumbnail terkecil untuk deteksi duplikasi
-            thumb_bytes = await self.client.download_media(event.message, file=bytes, thumb=0)
-            thumb_md5, img_hash = await calculate_thumbnail_hash_bytes(thumb_bytes)
-            dup_key = await db_check_duplicate_by_thumbnail_hash(self.user_id, thumb_md5)
-            if dup_key:
-                logger.info(f"[USER_ID: {self.user_id}] ⏩ Skip (MsgID: {message_key}): Duplicate thumbnail hash.")
-                await db_record_message(self.user_id, message_key, {
-                    'chat_id': event.chat_id,
-                    'message_id': event.message.id,
-                    'chat_name': chat_name,
-                    'media_type': media_type,
-                    'fingerprint': fp,
-                    'thumbnail_md5_hash': thumb_md5,
-                    'image_hash': img_hash,
-                    'status': 'duplicate_thumbnail_hash',
-                    'is_duplicate_of_key': dup_key,
-                })
-                return
-            if img_hash:
-                dup_key = await db_check_duplicate_by_image_hash(self.user_id, img_hash)
-                if dup_key:
-                    logger.info(f"[USER_ID: {self.user_id}] ⏩ Skip (MsgID: {message_key}): Duplicate image hash.")
-                    await db_record_message(self.user_id, message_key, {
-                        'chat_id': event.chat_id,
-                        'message_id': event.message.id,
-                        'chat_name': chat_name,
-                        'media_type': media_type,
-                        'fingerprint': fp,
-                        'thumbnail_md5_hash': thumb_md5,
-                        'image_hash': img_hash,
-                        'status': 'duplicate_image_hash',
-                        'is_duplicate_of_key': dup_key,
-                    })
-                    return
+        if await db_check_message_exists(self.user_id, message_key, route_id=route_id):
+            logger.info(f"[USER_ID: {self.user_id}][route:{route_id}] Skip {message_key}: already processed.")
+            return
 
-            # Do not pre-download to avoid delaying direct forward
-            cached_path = None
+        fingerprint = shared_ctx['fingerprint']
+        if await db_check_duplicate_by_fingerprint(self.user_id, fingerprint, route_id=route_id):
+            logger.info(f"[USER_ID: {self.user_id}][route:{route_id}] Skip {message_key}: duplicate fingerprint.")
+            return
 
-            logger.info(f"[USER_ID: {self.user_id}] ➡️ Attempting direct forward for MsgID: {event.message.id}")
-            await self.client.forward_messages(self.config['target_chat_id'], event.message)
-            logger.info(f"[USER_ID: {self.user_id}] ✅ Directly forwarded MsgID: {event.message.id}")
-            # No pre-cache used on success path; nothing to delete
-            content_hash = None
+        thumb_md5 = shared_ctx['thumb_md5']
+        img_hash = shared_ctx['img_hash']
+        dup_key = await db_check_duplicate_by_thumbnail_hash(self.user_id, thumb_md5, route_id=route_id)
+        if dup_key:
+            logger.info(f"[USER_ID: {self.user_id}][route:{route_id}] Skip {message_key}: duplicate thumbnail hash.")
             await db_record_message(self.user_id, message_key, {
+                'route_id': route_id,
                 'chat_id': event.chat_id,
                 'message_id': event.message.id,
                 'chat_name': chat_name,
                 'media_type': media_type,
-                'fingerprint': fp,
+                'fingerprint': fingerprint,
                 'thumbnail_md5_hash': thumb_md5,
                 'image_hash': img_hash,
-                'content_hash': content_hash,
-                'status': 'forwarded_directly'
+                'status': 'duplicate_thumbnail_hash',
+                'is_duplicate_of_key': dup_key,
             })
+            return
+        if img_hash:
+            dup_key = await db_check_duplicate_by_image_hash(self.user_id, img_hash, route_id=route_id)
+            if dup_key:
+                logger.info(f"[USER_ID: {self.user_id}][route:{route_id}] Skip {message_key}: duplicate image hash.")
+                await db_record_message(self.user_id, message_key, {
+                    'route_id': route_id,
+                    'chat_id': event.chat_id,
+                    'message_id': event.message.id,
+                    'chat_name': chat_name,
+                    'media_type': media_type,
+                    'fingerprint': fingerprint,
+                    'thumbnail_md5_hash': thumb_md5,
+                    'image_hash': img_hash,
+                    'status': 'duplicate_image_hash',
+                    'is_duplicate_of_key': dup_key,
+                })
+                return
+
+        try:
+            logger.info(f"[USER_ID: {self.user_id}][route:{route_id}] Forwarding MsgID: {event.message.id} -> {route_name}")
+            await self.client.forward_messages(target_peer, event.message)
+            await db_record_message(self.user_id, message_key, {
+                'route_id': route_id,
+                'chat_id': event.chat_id,
+                'message_id': event.message.id,
+                'chat_name': chat_name,
+                'media_type': media_type,
+                'fingerprint': fingerprint,
+                'thumbnail_md5_hash': thumb_md5,
+                'image_hash': img_hash,
+                'content_hash': None,
+                'status': 'forwarded_directly',
+            })
+            return
         except ChatForwardsRestrictedError:
-            if self.config.get('reupload_on_restricted'):
-                logger.info(f"[USER_ID: {self.user_id}] 🚧 Forward restricted. Trying download & re-upload...")
-                try:
-                    # Ukuran kasar bila tersedia (untuk dokumen/video); jika melebihi limit, skip
-                    raw_size = None
-                    if hasattr(event.message, 'file') and getattr(event.message, 'file', None):
-                        try:
-                            raw_size = event.message.file.size
-                        except Exception:
-                            raw_size = None
-                    if raw_size and MAX_UPLOAD_SIZE_BYTES and raw_size > MAX_UPLOAD_SIZE_BYTES:
-                        logger.info(f"[USER_ID: {self.user_id}] ⏭️ Skip re-upload: file too large {raw_size} bytes.")
+            if not route.get('reupload_on_restricted'):
+                logger.info(f"[USER_ID: {self.user_id}][route:{route_id}] Forward restricted. Reupload OFF.")
+                await db_record_message(self.user_id, message_key, {
+                    'route_id': route_id,
+                    'chat_id': event.chat_id,
+                    'message_id': event.message.id,
+                    'chat_name': chat_name,
+                    'media_type': media_type,
+                    'fingerprint': fingerprint,
+                    'thumbnail_md5_hash': thumb_md5,
+                    'image_hash': img_hash,
+                    'status': 'skipped_forward_restricted',
+                })
+                return
+        except Exception as e:
+            if "target peer" in str(e).lower():
+                logger.error(f"[USER_ID: {self.user_id}][route:{route_id}] Invalid target peer for route '{route_name}'.")
+                await self.send_feedback(
+                    f"⛔️ Route `{route_name}` gagal dipakai karena target `{route.get('target_chat_id')}` tidak valid."
+                )
+            else:
+                logger.warning(f"[USER_ID: {self.user_id}][route:{route_id}] Forward failed: {type(e).__name__}")
+            await db_record_message(self.user_id, message_key, {
+                'route_id': route_id,
+                'chat_id': event.chat_id,
+                'message_id': event.message.id,
+                'chat_name': chat_name,
+                'media_type': media_type,
+                'fingerprint': fingerprint,
+                'thumbnail_md5_hash': thumb_md5,
+                'image_hash': img_hash,
+                'status': f'error: {type(e).__name__}',
+            })
+            return
+
+        await self._reupload_message(
+            event=event,
+            route_name=route_name,
+            route_id=route_id,
+            media_type=media_type,
+            chat_name=chat_name,
+            message_key=message_key,
+            fingerprint=fingerprint,
+            thumb_md5=thumb_md5,
+            img_hash=img_hash,
+            target_peer=target_peer,
+            shared_ctx=shared_ctx,
+        )
+
+    async def _reupload_message(
+        self,
+        *,
+        event,
+        route_name: str,
+        route_id: int,
+        media_type: str,
+        chat_name: str,
+        message_key: str,
+        fingerprint: str | None,
+        thumb_md5: str | None,
+        img_hash: str | None,
+        target_peer,
+        shared_ctx: dict,
+    ):
+        try:
+            async with self.reupload_semaphore:
+                payload = await self._prepare_reupload_payload(event, media_type, shared_ctx)
+                status = payload.get('status')
+                if status != 'ready':
+                    await db_record_message(self.user_id, message_key, {
+                        'route_id': route_id,
+                        'chat_id': event.chat_id,
+                        'message_id': event.message.id,
+                        'chat_name': chat_name,
+                        'media_type': media_type,
+                        'fingerprint': fingerprint,
+                        'thumbnail_md5_hash': thumb_md5,
+                        'image_hash': img_hash,
+                        'status': status,
+                    })
+                    return
+
+                content_hash = payload.get('content_hash')
+                if content_hash:
+                    dup_key = await db_check_duplicate_by_content_hash(self.user_id, content_hash, route_id=route_id)
+                    if dup_key:
                         await db_record_message(self.user_id, message_key, {
+                            'route_id': route_id,
                             'chat_id': event.chat_id,
                             'message_id': event.message.id,
                             'chat_name': chat_name,
                             'media_type': media_type,
-                            'fingerprint': fp,
+                            'fingerprint': fingerprint,
                             'thumbnail_md5_hash': thumb_md5,
                             'image_hash': img_hash,
-                            'status': 'skipped_reupload_file_too_large'
+                            'content_hash': content_hash,
+                            'status': 'duplicate_content_hash',
+                            'is_duplicate_of_key': dup_key,
                         })
                         return
-                    caption = (event.message.message or '').strip() or None
-                    user_dir = os.path.join(DOWNLOADS_DIR, str(self.user_id))
-                    os.makedirs(user_dir, exist_ok=True)
 
-                    # Parallel download if possible
+                input_file = None
+                file_to_send = payload.get('file_to_send')
+                if HAS_FAST and isinstance(file_to_send, str) and os.path.exists(file_to_send):
                     try:
-                        cached_path = None
-                        if HAS_FAST and isinstance(event.message.media, MessageMediaDocument) and getattr(event.message.media, 'document', None):
-                            try:
-                                fname = None
-                                for attr in (event.message.media.document.attributes or []):
-                                    if isinstance(attr, DocumentAttributeFilename):
-                                        fname = attr.file_name
-                                        break
-                                if not fname:
-                                    ext = '.mp4' if media_type == 'video' else ''
-                                    fname = f"{event.message.id}{ext}"
-                                temp_path = os.path.join(user_dir, fname)
-                                with open(temp_path, 'wb') as out:
-                                    await ft_download_file(self.client, event.message.media.document, out)
-                                cached_path = temp_path
-                            except Exception as e:
-                                logger.warning(f"[USER_ID: {self.user_id}] Fast download failed: {e}. Falling back to standard.")
-                                cached_path = None
-                        
-                        if not cached_path:
-                            cached_path = await self.client.download_media(event.message, file=user_dir)
-                        file_to_send = cached_path
+                        with open(file_to_send, 'rb') as handle:
+                            input_file = await ft_upload_file(self.client, handle)
                     except Exception:
-                        data = await self.client.download_media(event.message, file=bytes)
-                        if not data:
-                            logger.info(f"[USER_ID: {self.user_id}] ❌ Download failed (probably protected content). Skipping.")
-                            await db_record_message(self.user_id, message_key, {
-                                'chat_id': event.chat_id,
-                                'message_id': event.message.id,
-                                'chat_name': chat_name,
-                                'media_type': media_type,
-                                'fingerprint': fp,
-                                'thumbnail_md5_hash': thumb_md5,
-                                'image_hash': img_hash,
-                                'status': 'skipped_protected_content'
-                            })
-                            return
-                        if MAX_UPLOAD_SIZE_BYTES and len(data) > MAX_UPLOAD_SIZE_BYTES:
-                            logger.info(f"[USER_ID: {self.user_id}] ⏭️ Data exceeds MAX_UPLOAD_SIZE. Skipping.")
-                            await db_record_message(self.user_id, message_key, {
-                                'chat_id': event.chat_id,
-                                'message_id': event.message.id,
-                                'chat_name': chat_name,
-                                'media_type': media_type,
-                                'fingerprint': fp,
-                                'thumbnail_md5_hash': thumb_md5,
-                                'image_hash': img_hash,
-                                'status': 'skipped_reupload_over_limit'
-                            })
-                            return
-                        # Write bytes to disk so we can use fast upload
-                        fname = f"{event.message.id}.bin"
-                        cached_path = os.path.join(user_dir, fname)
-                        with open(cached_path, 'wb') as f:
-                            f.write(data)
-                        file_to_send = cached_path
+                        input_file = None
 
-                    # Calculate strong content hash (to avoid duplicate re-uploads)
-                    content_hash = None
-                    if isinstance(file_to_send, (bytes, bytearray)):
-                        content_hash = self._sha256_bytes(file_to_send)
-                    elif isinstance(file_to_send, str):
-                        content_hash = self._sha256_file(file_to_send)
+                send_kwargs = dict(payload.get('send_kwargs') or {})
+                attrs = payload.get('attrs')
+                mime_type = payload.get('mime_type')
+                force_document = bool(payload.get('force_document'))
 
-                    if content_hash:
-                        dup_key = await db_check_duplicate_by_content_hash(self.user_id, content_hash)
-                        if dup_key:
-                            logger.info(f"[USER_ID: {self.user_id}] ⏩ Skip: duplicate by content hash.")
-                            self._try_delete_cache(cached_path)
-                            await db_record_message(self.user_id, message_key, {
-                                'chat_id': event.chat_id,
-                                'message_id': event.message.id,
-                                'chat_name': chat_name,
-                                'media_type': media_type,
-                                'fingerprint': fp,
-                                'thumbnail_md5_hash': thumb_md5,
-                                'image_hash': img_hash,
-                                'content_hash': content_hash,
-                                'status': 'duplicate_content_hash',
-                                'is_duplicate_of_key': dup_key,
-                            })
-                            return
+                if input_file is not None:
+                    await self.client.send_file(
+                        target_peer,
+                        file=input_file,
+                        attributes=attrs,
+                        mime_type=mime_type,
+                        force_document=force_document,
+                        **send_kwargs,
+                    )
+                else:
+                    await self.client.send_file(
+                        target_peer,
+                        file=file_to_send,
+                        attributes=attrs,
+                        mime_type=mime_type,
+                        force_document=force_document,
+                        **send_kwargs,
+                    )
 
-                    # Prepare send options to preserve video playability
-                    send_kwargs = {
-                        'caption': caption,
-                        'force_document': (media_type == 'document')
-                    }
-                    try:
-                        thumb_data = await self.client.download_media(event.message, file=bytes, thumb=0)
-                    except Exception:
-                        thumb_data = None
-                    # For videos, let Telegram generate its own preview; use thumb only for non-video
-                    if thumb_data and media_type != 'video':
-                        norm_thumb = _prepare_thumb_jpeg(thumb_data)
-                        if norm_thumb:
-                            send_kwargs['thumb'] = norm_thumb
-
-                    # Fast parallel upload when possible
-                    input_file = None
-                    if HAS_FAST and isinstance(file_to_send, str) and os.path.exists(file_to_send):
-                        try:
-                            with open(file_to_send, 'rb') as f:
-                                input_file = await ft_upload_file(self.client, f)
-                        except Exception:
-                            input_file = None
-
-                    if input_file is not None:
-                        # Prefer original attributes/mime for correct video handling
-                        attrs = []
-                        mime_type = None
-                        out_name = None
-                        if isinstance(event.message.media, MessageMediaDocument) and getattr(event.message.media, 'document', None):
-                            mime_type = event.message.media.document.mime_type
-                            for attr in (event.message.media.document.attributes or []):
-                                if isinstance(attr, DocumentAttributeFilename):
-                                    out_name = attr.file_name
-                                if isinstance(attr, DocumentAttributeVideo):
-                                    attrs.append(DocumentAttributeVideo(
-                                        duration=getattr(attr, 'duration', None),
-                                        w=getattr(attr, 'w', None),
-                                        h=getattr(attr, 'h', None),
-                                        supports_streaming=True
-                                    ))
-                            if out_name:
-                                attrs.append(DocumentAttributeFilename(out_name))
-                        if media_type == 'video' and (not mime_type or not mime_type.startswith('video/')):
-                            mime_type = 'video/mp4'
-                        if not attrs:
-                            inferred_attrs, inferred_mime = tg_utils.get_attributes(file_to_send)
-                            attrs = inferred_attrs
-                            mime_type = mime_type or inferred_mime
-                        await self.client.send_file(
-                            self.config['target_chat_id'],
-                            file=input_file,
-                            attributes=attrs,
-                            mime_type=mime_type,
-                            force_document=(media_type == 'document'),
-                            **send_kwargs
-                        )
-                    else:
-                        # Build explicit attributes/mime from original for correct orientation
-                        attrs = []
-                        mime_type = None
-                        out_name = None
-                        if isinstance(event.message.media, MessageMediaDocument) and getattr(event.message.media, 'document', None):
-                            mime_type = event.message.media.document.mime_type
-                            for attr in (event.message.media.document.attributes or []):
-                                if isinstance(attr, DocumentAttributeFilename):
-                                    out_name = attr.file_name
-                                if isinstance(attr, DocumentAttributeVideo):
-                                    attrs.append(DocumentAttributeVideo(
-                                        duration=getattr(attr, 'duration', None),
-                                        w=getattr(attr, 'w', None),
-                                        h=getattr(attr, 'h', None),
-                                        supports_streaming=True
-                                    ))
-                            if out_name:
-                                attrs.append(DocumentAttributeFilename(out_name))
-                        if media_type == 'video' and (not mime_type or not mime_type.startswith('video/')):
-                            mime_type = 'video/mp4'
-                        await self.client.send_file(
-                            self.config['target_chat_id'],
-                            file=file_to_send,
-                            attributes=attrs or None,
-                            mime_type=mime_type,
-                            **send_kwargs
-                        )
-                    logger.info(f"[USER_ID: {self.user_id}] ✅ Re-uploaded MsgID: {event.message.id}")
-                    # Hapus cache jika kita membuatnya tadi
-                    self._try_delete_cache(cached_path)
-                    await db_record_message(self.user_id, message_key, {
-                        'chat_id': event.chat_id,
-                        'message_id': event.message.id,
-                        'chat_name': chat_name,
-                        'media_type': media_type,
-                        'fingerprint': fp,
-                        'thumbnail_md5_hash': thumb_md5,
-                        'image_hash': img_hash,
-                        'content_hash': content_hash,
-                        'status': 'reuploaded_due_to_forward_restricted'
-                    })
-                except Exception as e:
-                    logger.warning(f"[USER_ID: {self.user_id}] ❌ Re-upload failed: {type(e).__name__}: {e}")
-                    await db_record_message(self.user_id, message_key, {
-                        'chat_id': event.chat_id,
-                        'message_id': event.message.id,
-                        'chat_name': chat_name,
-                        'media_type': media_type,
-                        'fingerprint': fp,
-                        'thumbnail_md5_hash': thumb_md5,
-                        'image_hash': img_hash,
-                        'status': f'reupload_error: {type(e).__name__}'
-                    })
-            else:
-                logger.info(f"[USER_ID: {self.user_id}] 🚫 Direct forward restricted. Skipping.")
+                logger.info(f"[USER_ID: {self.user_id}][route:{route_id}] Reuploaded MsgID: {event.message.id} -> {route_name}")
                 await db_record_message(self.user_id, message_key, {
+                    'route_id': route_id,
                     'chat_id': event.chat_id,
                     'message_id': event.message.id,
                     'chat_name': chat_name,
                     'media_type': media_type,
-                    'fingerprint': fp,
+                    'fingerprint': fingerprint,
                     'thumbnail_md5_hash': thumb_md5,
                     'image_hash': img_hash,
-                    'status': 'skipped_forward_restricted'
+                    'content_hash': content_hash,
+                    'status': 'reuploaded_due_to_forward_restricted',
                 })
         except Exception as e:
-            if "target peer" in str(e).lower():
-                logger.error(f"[USER_ID: {self.user_id}] ⛔️ CRITICAL ERROR: Target chat ID {self.config['target_chat_id']} is invalid or I don't have access. Stopping worker.")
-                await self.send_feedback(f"⛔️ Worker dihentikan! Target chat `{self.config['target_chat_id']}` tidak valid atau saya tidak punya akses.")
-                from user.manager import stop_user_worker; await stop_user_worker(self.user_id)
-            else:
-                logger.warning(f"[USER_ID: {self.user_id}] ⚠️ Direct forward failed ({type(e).__name__}). Skipping.")
-                await db_record_message(self.user_id, message_key, {
-                    'chat_id': event.chat_id,
-                    'message_id': event.message.id,
-                    'chat_name': chat_name,
-                    'media_type': media_type,
-                    'fingerprint': fp,
-                    'thumbnail_md5_hash': thumb_md5,
-                    'image_hash': img_hash,
-                    'status': f'error: {type(e).__name__}'
-                })
+            logger.warning(
+                f"[USER_ID: {self.user_id}][route:{route_id}] Reupload failed for route '{route_name}': {type(e).__name__}: {e}"
+            )
+            await db_record_message(self.user_id, message_key, {
+                'route_id': route_id,
+                'chat_id': event.chat_id,
+                'message_id': event.message.id,
+                'chat_name': chat_name,
+                'media_type': media_type,
+                'fingerprint': fingerprint,
+                'thumbnail_md5_hash': thumb_md5,
+                'image_hash': img_hash,
+                'status': f'reupload_error: {type(e).__name__}',
+            })

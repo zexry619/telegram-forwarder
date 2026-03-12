@@ -40,6 +40,7 @@ MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
 CACHE_TTL_HOURS = parse_int_env("CACHE_TTL_HOURS", 24)
 # Optional disk cap for downloads cache (0/None = disabled)
 MAX_CACHE_DISK_MB = parse_int_env("MAX_CACHE_DISK_MB", None)
+LIVE_REUPLOAD_CONCURRENCY = parse_int_env("LIVE_REUPLOAD_CONCURRENCY", 2)
 
 # --- Proxy ---
 PROXY_TYPE = os.getenv("PROXY_TYPE", "").lower() or None

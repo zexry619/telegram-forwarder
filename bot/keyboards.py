@@ -1,4 +1,5 @@
 from telethon.tl.types import KeyboardButtonCallback
+from shared.telegram import get_dialog_display_name, is_selectable_target_dialog
 
 def main_menu_keyboard():
     """
@@ -11,26 +12,31 @@ def main_menu_keyboard():
             KeyboardButtonCallback("⏹️ Hentikan", b'stop_worker')
         ],
         [
-            KeyboardButtonCallback("📊 Status", b'status')
+            KeyboardButtonCallback("📊 Status", b'status'),
+            KeyboardButtonCallback("🚚 Migrasi Media", b'migration_menu')
         ],
         [
-            # Tombol ini sekarang langsung membawa ke daftar pilihan target
-            KeyboardButtonCallback("🎯 Pilih Target dari Daftar", b'list_chats'),
-            KeyboardButtonCallback("🚫 Atur Pengecualian", b'set_exclude')
+            KeyboardButtonCallback("🎯 Target Route Default", b'list_chats'),
+            KeyboardButtonCallback("🧩 Kelola Routes", b'routes_menu')
         ],
         [
-            KeyboardButtonCallback("🗂 Filter Media", b'set_media_filter')
+            KeyboardButtonCallback("🚫 Pengecualian Default", b'set_exclude'),
+            KeyboardButtonCallback("🗂 Filter Default", b'set_media_filter')
         ],
         [
-            KeyboardButtonCallback("⏰ Jadwal Otomatis", b'schedule_menu')
-        ],
-        [
-            KeyboardButtonCallback("⚙️ Pengaturan", b'settings_menu')
+            KeyboardButtonCallback("⏰ Jadwal Otomatis", b'schedule_menu'),
+            KeyboardButtonCallback("⚙️ Pengaturan Default", b'settings_menu')
         ],
         [
             KeyboardButtonCallback("🔐 Login / Logout", b'auth_menu'),
             KeyboardButtonCallback("❓ Bantuan", b'help')
         ]
+    ]
+
+def onboarding_keyboard():
+    return [
+        [KeyboardButtonCallback("🔑 Login Sekarang", b'login')],
+        [KeyboardButtonCallback("❓ Panduan Login", b'help')],
     ]
 
 def auth_menu_keyboard():
@@ -53,7 +59,13 @@ def exclude_menu_keyboard():
         [KeyboardButtonCallback("⬅️ Kembali ke Menu Utama", b'main_menu')]
     ]
 
-def dynamic_chat_list_keyboard(dialogs, base_callback_prefix: str, existing_ids: set = None, show_all=True):
+def dynamic_chat_list_keyboard(
+    dialogs,
+    base_callback_prefix: str,
+    existing_ids: set = None,
+    show_all=True,
+    include_saved_messages: bool = False,
+):
     """
     Membuat keyboard dinamis dari daftar chat untuk pemilihan interaktif.
     Ini adalah fungsi 'pintar' yang digunakan untuk memilih target dan pengecualian.
@@ -72,8 +84,7 @@ def dynamic_chat_list_keyboard(dialogs, base_callback_prefix: str, existing_ids:
         
     chat_buttons = []
     for dialog in dialogs:
-        # Hanya proses grup dan channel
-        if not (dialog.is_group or dialog.is_channel):
+        if not is_selectable_target_dialog(dialog, include_saved_messages=include_saved_messages):
             continue
 
         dialog_id = dialog.id
@@ -85,7 +96,7 @@ def dynamic_chat_list_keyboard(dialogs, base_callback_prefix: str, existing_ids:
             continue
 
         # Format teks tombol
-        button_text = dialog.name[:40]  # Potong nama jika terlalu panjang
+        button_text = get_dialog_display_name(dialog)[:40]  # Potong nama jika terlalu panjang
         if is_existing and show_all:  # Tandai tombol di menu 'Tambah' jika sudah ada
             button_text = f"✅ {button_text}"
 
@@ -108,6 +119,51 @@ def admin_user_management_keyboard():
         [KeyboardButtonCallback("➕ Tambah Allowed User", b'admin_add_user')],
         [KeyboardButtonCallback("➖ Hapus Allowed User", b'admin_remove_user')],
         [KeyboardButtonCallback("⬅️ Kembali ke Menu Utama", b'main_menu')]
+    ]
+
+
+def routes_menu_keyboard():
+    return [
+        [KeyboardButtonCallback("📋 Lihat Semua Routes", b'route_list')],
+        [KeyboardButtonCallback("➕ Tambah Route Baru", b'route_add')],
+        [KeyboardButtonCallback("⬅️ Kembali ke Menu Utama", b'main_menu')],
+    ]
+
+
+def route_detail_keyboard(route_id: int, enabled: bool, is_default: bool, reupload_on: bool):
+    buttons = [
+        [KeyboardButtonCallback("✏️ Ubah Nama", f'route_rename_{route_id}'.encode())],
+        [KeyboardButtonCallback("📥 Atur Sumber", f'route_pick_source_menu_{route_id}'.encode())],
+        [KeyboardButtonCallback("🎯 Atur Tujuan", f'route_pick_target_menu_{route_id}'.encode())],
+        [KeyboardButtonCallback("🗂 Filter Media", f'route_filter_menu_{route_id}'.encode())],
+        [KeyboardButtonCallback("🚫 Pengecualian", f'route_exclude_menu_{route_id}'.encode())],
+        [KeyboardButtonCallback(("✅ " if reupload_on else "") + "♻️ Re-upload", f'route_reupload_toggle_{route_id}'.encode())],
+        [KeyboardButtonCallback("✅ Nonaktifkan" if enabled else "▶️ Aktifkan", f'route_toggle_{route_id}'.encode())],
+    ]
+    if not is_default:
+        buttons.append([KeyboardButtonCallback("🗑️ Hapus Route", f'route_delete_{route_id}'.encode())])
+    buttons.append([KeyboardButtonCallback("⬅️ Kembali ke Routes", b'route_list')])
+    return buttons
+
+
+def route_media_filter_keyboard(route_id: int, current: set):
+    def mark(text, cond):
+        return f"✅ {text}" if cond else text
+
+    return [
+        [KeyboardButtonCallback(mark("Semua Media", not current), f'route_filter_all_{route_id}'.encode())],
+        [KeyboardButtonCallback(mark("Foto", 'photo' in current), f'route_filter_photo_{route_id}'.encode())],
+        [KeyboardButtonCallback(mark("Video", 'video' in current), f'route_filter_video_{route_id}'.encode())],
+        [KeyboardButtonCallback(mark("Dokumen", 'document' in current), f'route_filter_document_{route_id}'.encode())],
+        [KeyboardButtonCallback("⬅️ Kembali", f'route_view_{route_id}'.encode())],
+    ]
+
+
+def route_exclude_menu_keyboard(route_id: int):
+    return [
+        [KeyboardButtonCallback("➕ Tambah Pengecualian", f'route_exclude_add_list_{route_id}'.encode())],
+        [KeyboardButtonCallback("➖ Hapus Pengecualian", f'route_exclude_remove_list_{route_id}'.encode())],
+        [KeyboardButtonCallback("⬅️ Kembali", f'route_view_{route_id}'.encode())],
     ]
 
 def media_filter_keyboard(current: set):

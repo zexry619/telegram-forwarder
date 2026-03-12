@@ -6,10 +6,16 @@ import time
 from io import BytesIO
 from typing import Optional
 
-from telethon.errors import ChatForwardsRestrictedError
+from telethon.errors import (
+    ChatForwardsRestrictedError,
+    FloodWaitError,
+    RpcCallFailError,
+    ServerError,
+    TimedOutError,
+)
 from telethon.tl.types import MessageMediaDocument, DocumentAttributeFilename, DocumentAttributeVideo
 from PIL import Image
-from telethon import utils as tg_utils, types as tg_types
+from telethon import utils as tg_utils
 
 try:
     from FastTelethon import download_file as ft_download_file, upload_file as ft_upload_file
@@ -25,6 +31,7 @@ from shared.database import (
     db_check_duplicate_by_image_hash,
     db_check_duplicate_by_content_hash,
 )
+from shared.telegram import resolve_chat_peer
 
 # Reuse helpers from worker
 from user.worker import (
@@ -35,6 +42,10 @@ from user.worker import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class MigrationCancelled(Exception):
+    pass
 
 def _prepare_thumb_jpeg(data: bytes) -> bytes | None:
     if not data:
@@ -64,11 +75,52 @@ async def _sha256_file(path: str) -> Optional[str]:
         return None
 
 
-async def _sha256_bytes(data: bytes) -> Optional[str]:
+def _build_unique_cache_name(source_chat_id: int, msg_id: int, preferred_name: str | None = None, fallback_ext: str = "") -> str:
+    safe_name = os.path.basename(preferred_name) if preferred_name else ""
+    if os.altsep:
+        safe_name = safe_name.replace(os.altsep, "_")
+    safe_name = safe_name.replace(os.sep, "_")
+    if not safe_name:
+        safe_name = f"media{fallback_ext}"
+    return f"{source_chat_id}_{msg_id}_{safe_name}"
+
+
+async def _sleep_with_cancel(delay: float, stop_event: asyncio.Event | None):
+    if delay <= 0:
+        return
+    if not stop_event:
+        await asyncio.sleep(delay)
+        return
     try:
-        return hashlib.sha256(data).hexdigest()
-    except Exception:
-        return None
+        await asyncio.wait_for(stop_event.wait(), timeout=delay)
+    except asyncio.TimeoutError:
+        return
+    raise MigrationCancelled()
+
+
+async def _run_with_retry(coro_factory, *, stop_event: asyncio.Event | None = None, retries: int = 2):
+    attempt = 0
+    while True:
+        if stop_event and stop_event.is_set():
+            raise MigrationCancelled()
+        try:
+            return await coro_factory()
+        except MigrationCancelled:
+            raise
+        except FloodWaitError as e:
+            if attempt >= retries or getattr(e, 'seconds', 0) > 10:
+                raise
+            attempt += 1
+            await _sleep_with_cancel(float(getattr(e, 'seconds', 1)), stop_event)
+        except (TimedOutError, RpcCallFailError, ServerError):
+            if attempt >= retries:
+                raise
+            attempt += 1
+            await _sleep_with_cancel(float(attempt), stop_event)
+
+
+def _is_retryable_rpc_error(exc: Exception) -> bool:
+    return isinstance(exc, (TimedOutError, RpcCallFailError, ServerError, FloodWaitError))
 
 
 async def run_migration(
@@ -104,6 +156,8 @@ async def run_migration(
     config = await get_user_config(user_id)
     allowed = set(config.get('allowed_media_types', set())) if respect_media_filter else set()
     reupload_on_restricted = bool(config.get('reupload_on_restricted'))
+    source_peer = resolve_chat_peer(client, source_chat_id)
+    dest_peer = resolve_chat_peer(client, dest_chat_id)
 
     processed = 0
     succeeded = 0
@@ -113,12 +167,12 @@ async def run_migration(
 
     # Resolve names for clearer terminal logs
     try:
-        src_ent = await client.get_entity(source_chat_id)
+        src_ent = await client.get_entity(source_peer)
         src_name = getattr(src_ent, 'title', getattr(src_ent, 'first_name', str(source_chat_id)))
     except Exception:
         src_name = str(source_chat_id)
     try:
-        dst_ent = await client.get_entity(dest_chat_id)
+        dst_ent = await client.get_entity(dest_peer)
         dst_name = getattr(dst_ent, 'title', getattr(dst_ent, 'first_name', str(dest_chat_id)))
     except Exception:
         dst_name = str(dest_chat_id)
@@ -130,6 +184,7 @@ async def run_migration(
             pass
 
     last_status_edit_ts = 0.0
+    migration_done = False
     async def update_status():
         if not status_msg_id:
             return
@@ -163,29 +218,28 @@ async def run_migration(
 
     # Track per-item progress here
     progress_map = {}
-    progress_lock = asyncio.Lock()
+
+    async def status_pump():
+        while not migration_done:
+            await asyncio.sleep(1.5)
+            try:
+                await update_status()
+            except Exception:
+                pass
 
     def make_progress_cb(msg_id: int, phase: str):
         last_pct = {'v': -1}
-        loop = asyncio.get_event_loop()
 
         def cb(current: int, total: int):
+            if stop_event and stop_event.is_set():
+                raise MigrationCancelled()
             try:
                 if not total:
                     return
                 pct = int(current * 100 / total)
                 if pct >= last_pct['v'] + 5 or pct in (100,):
                     last_pct['v'] = pct
-                    # Update map and schedule status update
-                    async def _update():
-                        async with progress_lock:
-                            progress_map[msg_id] = (phase, pct)
-                        logger.info(f"[MIG][user:{user_id}] {phase.capitalize()} msg {msg_id}: {pct}%")
-                        await update_status()
-                    try:
-                        loop.create_task(_update())
-                    except Exception:
-                        pass
+                    progress_map[msg_id] = (phase, pct)
             except Exception:
                 pass
         return cb
@@ -199,6 +253,7 @@ async def run_migration(
         + (f"Limit: `{limit}`" if limit else "Limit: semua")
     )
     await update_status()
+    status_task = asyncio.create_task(status_pump()) if status_msg_id else None
 
     # Concurrency setup
     sem = asyncio.Semaphore(max(1, int(concurrency or 1)))
@@ -206,9 +261,10 @@ async def run_migration(
 
     async def process_message(m):
         nonlocal processed, succeeded, reuploaded, skipped, failed
+        media_type = 'unknown'
 
         if stop_event and stop_event.is_set():
-            return
+            raise MigrationCancelled()
         if not is_valid_media(m.media):
             return
 
@@ -222,7 +278,7 @@ async def run_migration(
             thumb_md5 = None
             img_hash = None
             if dedupe_mode != 'none':
-                if await db_check_duplicate_by_fingerprint(user_id, fp):
+                if await db_check_duplicate_by_fingerprint(user_id, fp, route_id=None):
                     skipped += 1
                     logger.info(f"[MIG][user:{user_id}] Skip msg {m.id} ({media_type}) due to duplicate fingerprint")
                     await db_record_message(user_id, message_key, {
@@ -238,9 +294,12 @@ async def run_migration(
                     return
 
                 if dedupe_mode == 'strict':
-                    thumb_bytes = await client.download_media(m, file=bytes, thumb=0)
+                    thumb_bytes = await _run_with_retry(
+                        lambda: client.download_media(m, file=bytes, thumb=0),
+                        stop_event=stop_event,
+                    )
                     thumb_md5, img_hash = await calculate_thumbnail_hash_bytes(thumb_bytes)
-                    dup_key = await db_check_duplicate_by_thumbnail_hash(user_id, thumb_md5)
+                    dup_key = await db_check_duplicate_by_thumbnail_hash(user_id, thumb_md5, route_id=None)
                     if dup_key:
                         skipped += 1
                         logger.info(f"[MIG][user:{user_id}] Skip msg {m.id} ({media_type}) due to duplicate thumbnail hash")
@@ -257,7 +316,7 @@ async def run_migration(
                         })
                         return
                     if img_hash:
-                        dup_key = await db_check_duplicate_by_image_hash(user_id, img_hash)
+                        dup_key = await db_check_duplicate_by_image_hash(user_id, img_hash, route_id=None)
                         if dup_key:
                             skipped += 1
                             logger.info(f"[MIG][user:{user_id}] Skip msg {m.id} ({media_type}) due to duplicate image hash")
@@ -276,7 +335,10 @@ async def run_migration(
 
             try:
                 logger.info(f"[MIG][user:{user_id}] Forward msg {m.id} ({media_type}) → {dst_name} ({dest_chat_id})")
-                await client.forward_messages(dest_chat_id, m)
+                await _run_with_retry(
+                    lambda: client.forward_messages(dest_peer, m),
+                    stop_event=stop_event,
+                )
                 succeeded += 1
                 await db_record_message(user_id, message_key, {
                     'chat_id': source_chat_id,
@@ -342,23 +404,53 @@ async def run_migration(
                                     fname = attr.file_name
                                     break
                             if not fname:
-                                # fallback
                                 ext = '.mp4' if media_type == 'video' else ''
-                                fname = f"{m.id}{ext}"
+                                fname = f"media{ext}"
+                            fname = _build_unique_cache_name(source_chat_id, m.id, preferred_name=fname, fallback_ext='.mp4' if media_type == 'video' else '')
                             cached_path = os.path.join(user_dir, fname)
                             with open(cached_path, 'wb') as out:
-                                await ft_download_file(client, m.media.document, out, progress_callback=make_progress_cb(m.id, 'downloading'))
+                                await _run_with_retry(
+                                    lambda: ft_download_file(
+                                        client,
+                                        m.media.document,
+                                        out,
+                                        progress_callback=make_progress_cb(m.id, 'downloading')
+                                    ),
+                                    stop_event=stop_event,
+                                )
                         except Exception as e:
                             cached_path = None
                             logger.info(f"[MIG][user:{user_id}] Fast download failed for msg {m.id}: {type(e).__name__}")
                     if not cached_path:
                         try:
-                            cached_path = await client.download_media(
-                                m, file=user_dir, progress_callback=make_progress_cb(m.id, 'downloading')
+                            downloaded = await _run_with_retry(
+                                lambda: client.download_media(
+                                    m,
+                                    file=user_dir,
+                                    progress_callback=make_progress_cb(m.id, 'downloading')
+                                ),
+                                stop_event=stop_event,
                             )
-                        except Exception:
-                            data = await client.download_media(
-                                m, file=bytes, progress_callback=make_progress_cb(m.id, 'downloading')
+                            if isinstance(downloaded, str):
+                                unique_name = _build_unique_cache_name(source_chat_id, m.id, preferred_name=os.path.basename(downloaded))
+                                unique_path = os.path.join(user_dir, unique_name)
+                                if os.path.abspath(downloaded) != os.path.abspath(unique_path):
+                                    try:
+                                        os.replace(downloaded, unique_path)
+                                        downloaded = unique_path
+                                    except Exception:
+                                        pass
+                            cached_path = downloaded
+                        except Exception as download_exc:
+                            if _is_retryable_rpc_error(download_exc):
+                                raise
+                            data = await _run_with_retry(
+                                lambda: client.download_media(
+                                    m,
+                                    file=bytes,
+                                    progress_callback=make_progress_cb(m.id, 'downloading')
+                                ),
+                                stop_event=stop_event,
                             )
                             if not data:
                                 skipped += 1
@@ -389,7 +481,7 @@ async def run_migration(
                                 })
                                 return
                             # Write bytes to disk to use fast upload
-                            fname = f"{m.id}.bin"
+                            fname = _build_unique_cache_name(source_chat_id, m.id, fallback_ext='.bin')
                             cached_path = os.path.join(user_dir, fname)
                             with open(cached_path, 'wb') as f:
                                 f.write(data)
@@ -403,7 +495,7 @@ async def run_migration(
                         content_hash = None
 
                     if dedupe_mode == 'strict' and content_hash:
-                        dup_key = await db_check_duplicate_by_content_hash(user_id, content_hash)
+                        dup_key = await db_check_duplicate_by_content_hash(user_id, content_hash, route_id=None)
                         if dup_key:
                             skipped += 1
                             logger.info(f"[MIG][user:{user_id}] Skip reupload msg {m.id}: duplicate by content hash")
@@ -432,11 +524,15 @@ async def run_migration(
                         'force_document': (media_type == 'document')
                     }
                     # Thumb optional
-                    thumb_data = None
-                    try:
-                        thumb_data = await client.download_media(m, file=bytes, thumb=0)
-                    except Exception:
-                        thumb_data = None
+                    thumb_data = thumb_bytes if thumb_md5 else None
+                    if thumb_data is None and media_type != 'video':
+                        try:
+                            thumb_data = await _run_with_retry(
+                                lambda: client.download_media(m, file=bytes, thumb=0),
+                                stop_event=stop_event,
+                            )
+                        except Exception:
+                            thumb_data = None
                     if thumb_data and media_type != 'video':
                         norm_thumb = _prepare_thumb_jpeg(thumb_data)
                         if norm_thumb:
@@ -449,7 +545,14 @@ async def run_migration(
                     if HAS_FAST and cached_path and os.path.exists(cached_path):
                         try:
                             with open(cached_path, 'rb') as f:
-                                input_file = await ft_upload_file(client, f, progress_callback=make_progress_cb(m.id, 'uploading'))
+                                input_file = await _run_with_retry(
+                                    lambda: ft_upload_file(
+                                        client,
+                                        f,
+                                        progress_callback=make_progress_cb(m.id, 'uploading')
+                                    ),
+                                    stop_event=stop_event,
+                                )
                         except Exception as e:
                             input_file = None
                             logger.info(f"[MIG][user:{user_id}] Fast upload failed for msg {m.id}: {type(e).__name__}")
@@ -484,13 +587,16 @@ async def run_migration(
                             mime_type = mime_type or inferred_mime
 
                         force_doc = bool(send_kwargs.pop('force_document', media_type == 'document'))
-                        await client.send_file(
-                            dest_chat_id,
-                            file=input_file,
-                            attributes=attrs,
-                            mime_type=mime_type,
-                            force_document=force_doc,
-                            **send_kwargs
+                        await _run_with_retry(
+                            lambda: client.send_file(
+                                dest_peer,
+                                file=input_file,
+                                attributes=attrs,
+                                mime_type=mime_type,
+                                force_document=force_doc,
+                                **send_kwargs
+                            ),
+                            stop_event=stop_event,
                         )
                     else:
                         # Fallback to standard send_file using cached_path, with explicit attributes
@@ -515,14 +621,17 @@ async def run_migration(
                             mime_type = 'video/mp4'
 
                         force_doc = bool(send_kwargs.pop('force_document', media_type == 'document'))
-                        await client.send_file(
-                            dest_chat_id,
-                            file=cached_path,
-                            attributes=attrs or None,
-                            mime_type=mime_type,
-                            progress_callback=make_progress_cb(m.id, 'uploading'),
-                            force_document=force_doc,
-                            **send_kwargs
+                        await _run_with_retry(
+                            lambda: client.send_file(
+                                dest_peer,
+                                file=cached_path,
+                                attributes=attrs or None,
+                                mime_type=mime_type,
+                                progress_callback=make_progress_cb(m.id, 'uploading'),
+                                force_document=force_doc,
+                                **send_kwargs
+                            ),
+                            stop_event=stop_event,
                         )
                     reuploaded += 1
                     logger.info(f"[MIG][user:{user_id}] Reuploaded msg {m.id} ({media_type}) → {dst_name} ({dest_chat_id})")
@@ -542,6 +651,8 @@ async def run_migration(
                             os.remove(cached_path)
                     except Exception:
                         pass
+                except MigrationCancelled:
+                    raise
                 except Exception as e:
                     failed += 1
                     logger.warning(f"[MIG][user:{user_id}] Reupload failed for msg {m.id}: {type(e).__name__}: {e}")
@@ -559,6 +670,8 @@ async def run_migration(
                         await notify(f"❌ Reupload gagal untuk msg `{m.id}`: {type(e).__name__}")
                     except Exception:
                         pass
+            except MigrationCancelled:
+                raise
             except Exception as e:
                 failed += 1
                 logger.warning(f"[MIG][user:{user_id}] Forward failed for msg {m.id}: {type(e).__name__}: {e}")
@@ -576,6 +689,8 @@ async def run_migration(
                     await notify(f"❌ Forward gagal untuk msg `{m.id}`: {type(e).__name__}")
                 except Exception:
                     pass
+        except MigrationCancelled:
+            raise
         except Exception as e:
             failed += 1
             await db_record_message(user_id, message_key, {
@@ -601,31 +716,67 @@ async def run_migration(
                 # Update status message every item
                 await update_status()
             # Clear entry for this message
-            try:
-                async with progress_lock:
-                    progress_map.pop(m.id, None)
-            except Exception:
-                pass
+            progress_map.pop(m.id, None)
 
     async def worker_wrapper(m):
         async with sem:
             await process_message(m)
 
-    tasks = []
-    async for m in client.iter_messages(source_chat_id, limit=limit, reverse=True):
-        tasks.append(asyncio.create_task(worker_wrapper(m)))
+    pending = set()
+    max_pending = max(1, int(concurrency or 1))
+    cancelled = False
+    try:
+        async for m in client.iter_messages(source_peer, limit=limit, reverse=True):
+            if stop_event and stop_event.is_set():
+                cancelled = True
+                break
+            pending.add(asyncio.create_task(worker_wrapper(m)))
+            if len(pending) >= max_pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    try:
+                        await task
+                    except MigrationCancelled:
+                        cancelled = True
 
-    if tasks:
-        await asyncio.gather(*tasks)
+        if cancelled and pending:
+            for queued in pending:
+                queued.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            pending = set()
 
-    # If cancelled, reflect it
-    if stop_event and stop_event.is_set():
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                try:
+                    await task
+                except MigrationCancelled:
+                    cancelled = True
+                    for queued in pending:
+                        queued.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                        pending = set()
+                    break
+            if cancelled:
+                break
+    finally:
+        migration_done = True
+        if status_task:
+            status_task.cancel()
+            await asyncio.gather(status_task, return_exceptions=True)
+        await update_status()
+
+    if cancelled or (stop_event and stop_event.is_set()):
         try:
             await bot_client.send_message(user_id, "⛔ Migrasi dibatalkan oleh pengguna.")
         except Exception:
             pass
+        logger.info(
+            f"[MIG][user:{user_id}] Cancelled | processed={processed} success={succeeded} reupload={reuploaded} skip={skipped} fail={failed}"
+        )
+        return
 
-    # Final summary
     logger.info(f"[MIG][user:{user_id}] Done | processed={processed} success={succeeded} reupload={reuploaded} skip={skipped} fail={failed}")
     await notify(
         f"✅ Migrasi selesai. Total diproses `{processed}`, sukses `{succeeded}`, reupload `{reuploaded}`, skip `{skipped}`, gagal `{failed}`"
