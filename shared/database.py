@@ -500,7 +500,13 @@ async def db_check_duplicate_by_fingerprint(user_id: int, fp: str, route_id: int
                 SELECT message_key
                 FROM forwarded_messages
                 WHERE user_id = ? AND fingerprint = ?
-                  AND (status LIKE 'forwarded%' OR status LIKE 'reuploaded%' OR status LIKE 'duplicate%')
+                  AND (
+                      status LIKE 'forwarded%'
+                      OR status LIKE 'reuploaded%'
+                      OR status LIKE 'duplicate%'
+                      OR status LIKE 'migrated_forwarded%'
+                      OR status LIKE 'migrated_reuploaded%'
+                  )
                 LIMIT 1
             """
             params = (user_id, fp)
@@ -509,7 +515,13 @@ async def db_check_duplicate_by_fingerprint(user_id: int, fp: str, route_id: int
                 SELECT message_key
                 FROM forwarded_messages
                 WHERE user_id = ? AND route_id = ? AND fingerprint = ?
-                  AND (status LIKE 'forwarded%' OR status LIKE 'reuploaded%' OR status LIKE 'duplicate%')
+                  AND (
+                      status LIKE 'forwarded%'
+                      OR status LIKE 'reuploaded%'
+                      OR status LIKE 'duplicate%'
+                      OR status LIKE 'migrated_forwarded%'
+                      OR status LIKE 'migrated_reuploaded%'
+                  )
                 LIMIT 1
             """
             params = (user_id, int(route_id or 0), fp)
@@ -527,7 +539,13 @@ async def db_check_duplicate_by_thumbnail_hash(user_id: int, thumb_hash: str, ro
                 SELECT message_key
                 FROM forwarded_messages
                 WHERE user_id = ? AND thumbnail_md5_hash = ?
-                  AND (status LIKE 'forwarded%' OR status LIKE 'reuploaded%' OR status LIKE 'duplicate%')
+                  AND (
+                      status LIKE 'forwarded%'
+                      OR status LIKE 'reuploaded%'
+                      OR status LIKE 'duplicate%'
+                      OR status LIKE 'migrated_forwarded%'
+                      OR status LIKE 'migrated_reuploaded%'
+                  )
                 LIMIT 1
             """
             params = (user_id, thumb_hash)
@@ -536,7 +554,13 @@ async def db_check_duplicate_by_thumbnail_hash(user_id: int, thumb_hash: str, ro
                 SELECT message_key
                 FROM forwarded_messages
                 WHERE user_id = ? AND route_id = ? AND thumbnail_md5_hash = ?
-                  AND (status LIKE 'forwarded%' OR status LIKE 'reuploaded%' OR status LIKE 'duplicate%')
+                  AND (
+                      status LIKE 'forwarded%'
+                      OR status LIKE 'reuploaded%'
+                      OR status LIKE 'duplicate%'
+                      OR status LIKE 'migrated_forwarded%'
+                      OR status LIKE 'migrated_reuploaded%'
+                  )
                 LIMIT 1
             """
             params = (user_id, int(route_id or 0), thumb_hash)
@@ -554,7 +578,13 @@ async def db_check_duplicate_by_image_hash(user_id: int, image_hash: str, route_
                 SELECT message_key
                 FROM forwarded_messages
                 WHERE user_id = ? AND image_hash = ?
-                  AND (status LIKE 'forwarded%' OR status LIKE 'reuploaded%' OR status LIKE 'duplicate%')
+                  AND (
+                      status LIKE 'forwarded%'
+                      OR status LIKE 'reuploaded%'
+                      OR status LIKE 'duplicate%'
+                      OR status LIKE 'migrated_forwarded%'
+                      OR status LIKE 'migrated_reuploaded%'
+                  )
                 LIMIT 1
             """
             params = (user_id, image_hash)
@@ -563,7 +593,13 @@ async def db_check_duplicate_by_image_hash(user_id: int, image_hash: str, route_
                 SELECT message_key
                 FROM forwarded_messages
                 WHERE user_id = ? AND route_id = ? AND image_hash = ?
-                  AND (status LIKE 'forwarded%' OR status LIKE 'reuploaded%' OR status LIKE 'duplicate%')
+                  AND (
+                      status LIKE 'forwarded%'
+                      OR status LIKE 'reuploaded%'
+                      OR status LIKE 'duplicate%'
+                      OR status LIKE 'migrated_forwarded%'
+                      OR status LIKE 'migrated_reuploaded%'
+                  )
                 LIMIT 1
             """
             params = (user_id, int(route_id or 0), image_hash)
@@ -581,7 +617,13 @@ async def db_check_duplicate_by_content_hash(user_id: int, content_hash: str, ro
                 SELECT message_key
                 FROM forwarded_messages
                 WHERE user_id = ? AND content_hash = ?
-                  AND (status LIKE 'forwarded%' OR status LIKE 'reuploaded%' OR status LIKE 'duplicate%')
+                  AND (
+                      status LIKE 'forwarded%'
+                      OR status LIKE 'reuploaded%'
+                      OR status LIKE 'duplicate%'
+                      OR status LIKE 'migrated_forwarded%'
+                      OR status LIKE 'migrated_reuploaded%'
+                  )
                 LIMIT 1
             """
             params = (user_id, content_hash)
@@ -590,7 +632,13 @@ async def db_check_duplicate_by_content_hash(user_id: int, content_hash: str, ro
                 SELECT message_key
                 FROM forwarded_messages
                 WHERE user_id = ? AND route_id = ? AND content_hash = ?
-                  AND (status LIKE 'forwarded%' OR status LIKE 'reuploaded%' OR status LIKE 'duplicate%')
+                  AND (
+                      status LIKE 'forwarded%'
+                      OR status LIKE 'reuploaded%'
+                      OR status LIKE 'duplicate%'
+                      OR status LIKE 'migrated_forwarded%'
+                      OR status LIKE 'migrated_reuploaded%'
+                  )
                 LIMIT 1
             """
             params = (user_id, int(route_id or 0), content_hash)

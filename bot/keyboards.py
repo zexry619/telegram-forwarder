@@ -130,16 +130,17 @@ def routes_menu_keyboard():
     ]
 
 
-def route_detail_keyboard(route_id: int, enabled: bool, is_default: bool, reupload_on: bool):
+def route_detail_keyboard(route_id: int, enabled: bool, is_default: bool, reupload_on: bool, allow_exclusions: bool = True):
     buttons = [
         [KeyboardButtonCallback("✏️ Ubah Nama", f'route_rename_{route_id}'.encode())],
         [KeyboardButtonCallback("📥 Atur Sumber", f'route_pick_source_menu_{route_id}'.encode())],
         [KeyboardButtonCallback("🎯 Atur Tujuan", f'route_pick_target_menu_{route_id}'.encode())],
         [KeyboardButtonCallback("🗂 Filter Media", f'route_filter_menu_{route_id}'.encode())],
-        [KeyboardButtonCallback("🚫 Pengecualian", f'route_exclude_menu_{route_id}'.encode())],
         [KeyboardButtonCallback(("✅ " if reupload_on else "") + "♻️ Re-upload", f'route_reupload_toggle_{route_id}'.encode())],
         [KeyboardButtonCallback("✅ Nonaktifkan" if enabled else "▶️ Aktifkan", f'route_toggle_{route_id}'.encode())],
     ]
+    if allow_exclusions:
+        buttons.insert(4, [KeyboardButtonCallback("🚫 Pengecualian", f'route_exclude_menu_{route_id}'.encode())])
     if not is_default:
         buttons.append([KeyboardButtonCallback("🗑️ Hapus Route", f'route_delete_{route_id}'.encode())])
     buttons.append([KeyboardButtonCallback("⬅️ Kembali ke Routes", b'route_list')])

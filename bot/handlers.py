@@ -124,6 +124,7 @@ def setup_handlers(bot):
         media_types = route.get('allowed_media_types') or set()
         media_label = "semua" if not media_types else ", ".join(sorted(media_types))
         exclude_count = len(route.get('excluded_chat_ids') or set())
+        allow_exclusions = route.get('source_chat_id') is None
         text = (
             f"🧩 **Route: {route.get('name')}**\n\n"
             f"ID: `{route.get('id')}`\n"
@@ -132,7 +133,7 @@ def setup_handlers(bot):
             f"Sumber: `{source_label}`\n"
             f"Tujuan: `{target_label}`\n"
             f"Media: `{media_label}`\n"
-            f"Pengecualian: `{exclude_count} chat`\n"
+            f"Pengecualian: `{exclude_count} chat{' (aktif)' if allow_exclusions else ' (tidak dipakai untuk sumber spesifik)'}`\n"
             f"Re-upload saat forward diblokir: `{ 'ON' if route.get('reupload_on_restricted') else 'OFF' }`"
         )
         await try_edit(
@@ -143,6 +144,7 @@ def setup_handlers(bot):
                 route.get('enabled', True),
                 route.get('is_default', False),
                 route.get('reupload_on_restricted', False),
+                allow_exclusions=allow_exclusions,
             ),
         )
 
@@ -806,12 +808,15 @@ def setup_handlers(bot):
         route = await get_route_by_id(event.sender_id, route_id)
         if not route:
             return await event.answer("Route tidak ditemukan.", alert=True)
+        if route.get('source_chat_id') is not None:
+            await event.answer("Pengecualian hanya dipakai untuk route dengan sumber 'Semua Chat'.", alert=True)
+            return await render_route_detail(event, route)
         count = len(route.get('excluded_chat_ids') or set())
         text = (
             f"🚫 **Pengecualian Route**\n\n"
             f"Route: `{route.get('name')}`\n"
             f"Jumlah pengecualian: `{count} chat`\n\n"
-            "Catatan: jika sumber route spesifik ke satu chat, daftar pengecualian biasanya tidak terpakai."
+            "Daftar ini hanya berlaku jika sumber route adalah `Semua Chat`."
         )
         await try_edit(event, text, buttons=route_exclude_menu_keyboard(route_id))
 
@@ -823,6 +828,9 @@ def setup_handlers(bot):
         route = await get_route_by_id(event.sender_id, route_id)
         if not route:
             return await event.answer("Route tidak ditemukan.", alert=True)
+        if route.get('source_chat_id') is not None:
+            await event.answer("Pengecualian hanya dipakai untuk route dengan sumber 'Semua Chat'.", alert=True)
+            return await render_route_detail(event, route)
         client = await get_client_for_user(event.sender_id)
         dialogs = await client.get_dialogs(limit=100)
         buttons = dynamic_chat_list_keyboard(
@@ -843,6 +851,9 @@ def setup_handlers(bot):
         route = await get_route_by_id(event.sender_id, route_id)
         if not route:
             return await event.answer("Route tidak ditemukan.", alert=True)
+        if route.get('source_chat_id') is not None:
+            await event.answer("Pengecualian hanya dipakai untuk route dengan sumber 'Semua Chat'.", alert=True)
+            return await render_route_detail(event, route)
         existing_ids = route.get('excluded_chat_ids', set())
         if not existing_ids:
             return await event.answer("Daftar pengecualian route kosong.", alert=True)
@@ -867,6 +878,9 @@ def setup_handlers(bot):
         route = await get_route_by_id(event.sender_id, route_id)
         if not route:
             return await event.answer("Route tidak ditemukan.", alert=True)
+        if route.get('source_chat_id') is not None:
+            await event.answer("Pengecualian hanya dipakai untuk route dengan sumber 'Semua Chat'.", alert=True)
+            return await render_route_detail(event, route)
         excluded = set(route.get('excluded_chat_ids') or set())
         if chat_id in excluded:
             return await event.answer("Chat sudah ada di pengecualian route.", alert=True)
@@ -885,6 +899,9 @@ def setup_handlers(bot):
         route = await get_route_by_id(event.sender_id, route_id)
         if not route:
             return await event.answer("Route tidak ditemukan.", alert=True)
+        if route.get('source_chat_id') is not None:
+            await event.answer("Pengecualian hanya dipakai untuk route dengan sumber 'Semua Chat'.", alert=True)
+            return await render_route_detail(event, route)
         excluded = set(route.get('excluded_chat_ids') or set())
         excluded.discard(chat_id)
         await update_user_route(event.sender_id, route_id, excluded_chat_ids=excluded)

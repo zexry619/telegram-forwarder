@@ -274,7 +274,7 @@ async def run_migration(
 
         message_key = f"{source_chat_id}_{m.id}"
         try:
-            fp = await get_media_fingerprint(m)
+            fp = await get_media_fingerprint(m.media)
             thumb_md5 = None
             img_hash = None
             if dedupe_mode != 'none':

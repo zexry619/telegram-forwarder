@@ -106,7 +106,13 @@ async def refresh_user_worker_routes(user_id: int):
         return
     worker = ACTIVE_SESSIONS[user_id]
     worker.config = await get_user_config(user_id)
-    await worker.reload_routes(await get_user_routes(user_id, enabled_only=True))
+    routes = await get_user_routes(user_id, enabled_only=True)
+    await worker.reload_routes(routes)
+    if not any(route.get('target_chat_id') for route in routes):
+        await worker.stop()
+        ACTIVE_SESSIONS[user_id] = worker.client
+        await update_user_config(user_id, 'status', 'stopped')
+        logger.info(f"Worker for user {user_id} stopped after route refresh because no active target remains.")
 
 async def stop_user_worker(user_id: int):
     logger.info(f"Attempting to stop worker for user {user_id}...")
