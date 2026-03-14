@@ -303,7 +303,7 @@ class UserWorker:
 
         cached_path = None
         try:
-            if HAS_FAST and isinstance(event.message.media, MessageMediaDocument) and getattr(event.message.media, 'document', None):
+            if media_type != 'video' and HAS_FAST and isinstance(event.message.media, MessageMediaDocument) and getattr(event.message.media, 'document', None):
                 try:
                     original_name = None
                     for attr in (event.message.media.document.attributes or []):
@@ -344,7 +344,7 @@ class UserWorker:
                 payload = {'status': 'skipped_reupload_over_limit'}
                 shared_ctx['reupload_payload'] = payload
                 return payload
-            filename = self._build_unique_cache_name(event, fallback_ext='.bin')
+            filename = self._build_unique_cache_name(event, fallback_ext='.mp4' if media_type == 'video' else '.bin')
             cached_path = os.path.join(user_dir, filename)
             with open(cached_path, 'wb') as handle:
                 handle.write(data)
@@ -595,7 +595,7 @@ class UserWorker:
 
                 input_file = None
                 file_to_send = payload.get('file_to_send')
-                if HAS_FAST and isinstance(file_to_send, str) and os.path.exists(file_to_send):
+                if media_type != 'video' and HAS_FAST and isinstance(file_to_send, str) and os.path.exists(file_to_send):
                     try:
                         with open(file_to_send, 'rb') as handle:
                             input_file = await ft_upload_file(self.client, handle)

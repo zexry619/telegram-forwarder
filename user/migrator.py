@@ -471,7 +471,7 @@ async def run_migration(
 
                     cached_path = None
                     # Prefer parallel downloader if available and we have a Document (with size)
-                    if HAS_FAST and isinstance(m.media, MessageMediaDocument) and getattr(m.media, 'document', None):
+                    if media_type != 'video' and HAS_FAST and isinstance(m.media, MessageMediaDocument) and getattr(m.media, 'document', None):
                         try:
                             # Choose a filename
                             fname = None
@@ -557,7 +557,7 @@ async def run_migration(
                                 })
                                 return
                             # Write bytes to disk to use fast upload
-                            fname = _build_unique_cache_name(source_chat_id, m.id, fallback_ext='.bin')
+                            fname = _build_unique_cache_name(source_chat_id, m.id, fallback_ext='.mp4' if media_type == 'video' else '.bin')
                             cached_path = os.path.join(user_dir, fname)
                             with open(cached_path, 'wb') as f:
                                 f.write(data)
@@ -618,7 +618,7 @@ async def run_migration(
                         return
 
                     input_file = None
-                    if HAS_FAST and cached_path and os.path.exists(cached_path):
+                    if media_type != 'video' and HAS_FAST and cached_path and os.path.exists(cached_path):
                         try:
                             with open(cached_path, 'rb') as f:
                                 input_file = await _run_with_retry(
