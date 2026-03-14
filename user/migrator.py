@@ -130,6 +130,32 @@ def _finalize_media_send_metadata(
     return attrs or None, mime_type
 
 
+def _build_video_send_options(message, mime_type: str | None) -> tuple[dict, list | None, str | None, str | None]:
+    options = {'supports_streaming': True}
+    attrs = []
+    out_name = None
+    doc = getattr(getattr(message, 'media', None), 'document', None)
+    if doc:
+        mime_type = doc.mime_type or mime_type
+        for attr in (doc.attributes or []):
+            if isinstance(attr, DocumentAttributeFilename):
+                out_name = attr.file_name
+            elif isinstance(attr, DocumentAttributeVideo):
+                if getattr(attr, 'duration', None) is not None:
+                    options['duration'] = attr.duration
+                if getattr(attr, 'w', None) is not None:
+                    options['width'] = attr.w
+                if getattr(attr, 'h', None) is not None:
+                    options['height'] = attr.h
+                attrs.append(DocumentAttributeVideo(
+                    duration=getattr(attr, 'duration', None),
+                    w=getattr(attr, 'w', None),
+                    h=getattr(attr, 'h', None),
+                    supports_streaming=True
+                ))
+    return options, attrs or None, out_name, mime_type
+
+
 async def _sleep_with_cancel(delay: float, stop_event: asyncio.Event | None):
     if delay <= 0:
         return
@@ -609,22 +635,20 @@ async def run_migration(
 
                     if input_file is not None:
                         # Build attributes/mime from original message to ensure streamable video
+                        video_kwargs = {}
                         attrs = []
                         mime_type = None
                         out_name = None
-                        if isinstance(m.media, MessageMediaDocument) and getattr(m.media, 'document', None):
+                        if media_type == 'video':
+                            video_kwargs, attrs, out_name, mime_type = _build_video_send_options(m, mime_type)
+                            attrs = list(attrs or [])
+                            if out_name:
+                                attrs.append(DocumentAttributeFilename(out_name))
+                        elif isinstance(m.media, MessageMediaDocument) and getattr(m.media, 'document', None):
                             mime_type = m.media.document.mime_type
                             for attr in (m.media.document.attributes or []):
                                 if isinstance(attr, DocumentAttributeFilename):
                                     out_name = attr.file_name
-                                if isinstance(attr, DocumentAttributeVideo):
-                                    attrs.append(DocumentAttributeVideo(
-                                        duration=getattr(attr, 'duration', None),
-                                        w=getattr(attr, 'w', None),
-                                        h=getattr(attr, 'h', None),
-                                        supports_streaming=True
-                                    ))
-                            # Ensure filename present
                             if out_name:
                                 attrs.append(DocumentAttributeFilename(out_name))
                         attrs, mime_type = _finalize_media_send_metadata(
@@ -636,34 +660,48 @@ async def run_migration(
                         )
 
                         force_doc = bool(send_kwargs.pop('force_document', media_type == 'document'))
-                        await _run_with_retry(
-                            lambda: client.send_file(
-                                dest_peer,
-                                file=input_file,
-                                attributes=attrs,
-                                mime_type=mime_type,
-                                force_document=force_doc,
-                                **send_kwargs
-                            ),
-                            stop_event=stop_event,
-                        )
+                        if media_type == 'video' and cached_path:
+                            await _run_with_retry(
+                                lambda: client.send_file(
+                                    dest_peer,
+                                    file=cached_path,
+                                    attributes=attrs,
+                                    mime_type=mime_type,
+                                    force_document=False,
+                                    progress_callback=make_progress_cb(m.id, 'uploading'),
+                                    **video_kwargs,
+                                    **send_kwargs
+                                ),
+                                stop_event=stop_event,
+                            )
+                        else:
+                            await _run_with_retry(
+                                lambda: client.send_file(
+                                    dest_peer,
+                                    file=input_file,
+                                    attributes=attrs,
+                                    mime_type=mime_type,
+                                    force_document=force_doc,
+                                    **send_kwargs
+                                ),
+                                stop_event=stop_event,
+                            )
                     else:
                         # Fallback to standard send_file using cached_path, with explicit attributes
+                        video_kwargs = {}
                         attrs = []
                         mime_type = None
                         out_name = None
-                        if isinstance(m.media, MessageMediaDocument) and getattr(m.media, 'document', None):
+                        if media_type == 'video':
+                            video_kwargs, attrs, out_name, mime_type = _build_video_send_options(m, mime_type)
+                            attrs = list(attrs or [])
+                            if out_name:
+                                attrs.append(DocumentAttributeFilename(out_name))
+                        elif isinstance(m.media, MessageMediaDocument) and getattr(m.media, 'document', None):
                             mime_type = m.media.document.mime_type
                             for attr in (m.media.document.attributes or []):
                                 if isinstance(attr, DocumentAttributeFilename):
                                     out_name = attr.file_name
-                                if isinstance(attr, DocumentAttributeVideo):
-                                    attrs.append(DocumentAttributeVideo(
-                                        duration=getattr(attr, 'duration', None),
-                                        w=getattr(attr, 'w', None),
-                                        h=getattr(attr, 'h', None),
-                                        supports_streaming=True
-                                    ))
                             if out_name:
                                 attrs.append(DocumentAttributeFilename(out_name))
                         attrs, mime_type = _finalize_media_send_metadata(
@@ -683,6 +721,7 @@ async def run_migration(
                                 mime_type=mime_type,
                                 progress_callback=make_progress_cb(m.id, 'uploading'),
                                 force_document=force_doc,
+                                **video_kwargs,
                                 **send_kwargs
                             ),
                             stop_event=stop_event,

@@ -94,6 +94,34 @@ def _finalize_media_send_metadata(
     return attrs or None, mime_type
 
 
+def _build_video_send_options(message, mime_type: str | None) -> tuple[dict, list | None, str | None]:
+    options = {'supports_streaming': True}
+    attrs = []
+    out_name = None
+    doc = getattr(getattr(message, 'media', None), 'document', None)
+    if doc:
+        mime_type = doc.mime_type or mime_type
+        for attr in (doc.attributes or []):
+            if isinstance(attr, DocumentAttributeFilename):
+                out_name = attr.file_name
+            elif isinstance(attr, DocumentAttributeVideo):
+                if getattr(attr, 'duration', None) is not None:
+                    options['duration'] = attr.duration
+                if getattr(attr, 'w', None) is not None:
+                    options['width'] = attr.w
+                if getattr(attr, 'h', None) is not None:
+                    options['height'] = attr.h
+                attrs.append(
+                    DocumentAttributeVideo(
+                        duration=getattr(attr, 'duration', None),
+                        w=getattr(attr, 'w', None),
+                        h=getattr(attr, 'h', None),
+                        supports_streaming=True,
+                    )
+                )
+    return options, attrs or None, out_name, mime_type
+
+
 def get_media_type_string(media):
     if isinstance(media, MessageMediaPhoto):
         return "photo"
@@ -330,23 +358,20 @@ class UserWorker:
             if normalized_thumb:
                 send_kwargs['thumb'] = normalized_thumb
 
+        video_kwargs = {}
         attrs = []
         mime_type = None
         out_name = None
-        if isinstance(event.message.media, MessageMediaDocument) and getattr(event.message.media, 'document', None):
+        if media_type == 'video':
+            video_kwargs, attrs, out_name, mime_type = _build_video_send_options(event.message, mime_type)
+            attrs = list(attrs or [])
+            if out_name:
+                attrs.append(DocumentAttributeFilename(out_name))
+        elif isinstance(event.message.media, MessageMediaDocument) and getattr(event.message.media, 'document', None):
             mime_type = event.message.media.document.mime_type
             for attr in (event.message.media.document.attributes or []):
                 if isinstance(attr, DocumentAttributeFilename):
                     out_name = attr.file_name
-                if isinstance(attr, DocumentAttributeVideo):
-                    attrs.append(
-                        DocumentAttributeVideo(
-                            duration=getattr(attr, 'duration', None),
-                            w=getattr(attr, 'w', None),
-                            h=getattr(attr, 'h', None),
-                            supports_streaming=True,
-                        )
-                    )
             if out_name:
                 attrs.append(DocumentAttributeFilename(out_name))
         attrs, mime_type = _finalize_media_send_metadata(
@@ -366,6 +391,7 @@ class UserWorker:
             'attrs': attrs,
             'mime_type': mime_type,
             'force_document': (media_type == 'document'),
+            'video_kwargs': video_kwargs,
         }
         shared_ctx['reupload_payload'] = payload
         return payload
@@ -580,8 +606,19 @@ class UserWorker:
                 attrs = payload.get('attrs')
                 mime_type = payload.get('mime_type')
                 force_document = bool(payload.get('force_document'))
+                video_kwargs = dict(payload.get('video_kwargs') or {})
 
-                if input_file is not None:
+                if media_type == 'video' and isinstance(file_to_send, str):
+                    await self.client.send_file(
+                        target_peer,
+                        file=file_to_send,
+                        attributes=attrs,
+                        mime_type=mime_type,
+                        force_document=False,
+                        **video_kwargs,
+                        **send_kwargs,
+                    )
+                elif input_file is not None:
                     await self.client.send_file(
                         target_peer,
                         file=input_file,

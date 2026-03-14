@@ -246,6 +246,7 @@ async def _internal_transfer_to_telegram(client: TelegramClient,
                                          ) -> Tuple[TypeInputFile, int]:
     file_id = helpers.generate_random_long()
     file_size = os.path.getsize(response.name)
+    file_name = os.path.basename(getattr(response, "name", "") or "") or "upload"
 
     hash_md5 = hashlib.md5()
     uploader = ParallelTransferrer(client)
@@ -274,9 +275,9 @@ async def _internal_transfer_to_telegram(client: TelegramClient,
         await uploader.upload(bytes(buffer))
     await uploader.finish_upload()
     if is_large:
-        return InputFileBig(file_id, part_count, "upload"), file_size
+        return InputFileBig(file_id, part_count, file_name), file_size
     else:
-        return InputFile(file_id, part_count, "upload", hash_md5.hexdigest()), file_size
+        return InputFile(file_id, part_count, file_name, hash_md5.hexdigest()), file_size
 
 
 async def download_file(client: TelegramClient,
@@ -284,19 +285,19 @@ async def download_file(client: TelegramClient,
                         out: BinaryIO,
                         progress_callback: callable = None
                         ) -> BinaryIO:
-    size = location.size
-    dc_id, location = utils.get_input_location(location)
-    # We lock the transfers because telegram has connection count limits
-    downloader = ParallelTransferrer(client, dc_id)
-    downloaded = downloader.download(location, size)
-    async for x in downloaded:
-        out.write(x)
-        if progress_callback:
-            r = progress_callback(out.tell(), size)
-            if inspect.isawaitable(r):
-                await r
+    async with parallel_transfer_locks[id(client)]:
+        size = location.size
+        dc_id, location = utils.get_input_location(location)
+        downloader = ParallelTransferrer(client, dc_id)
+        downloaded = downloader.download(location, size)
+        async for x in downloaded:
+            out.write(x)
+            if progress_callback:
+                r = progress_callback(out.tell(), size)
+                if inspect.isawaitable(r):
+                    await r
 
-    return out
+        return out
 
 
 async def upload_file(client: TelegramClient,
@@ -304,5 +305,6 @@ async def upload_file(client: TelegramClient,
                       progress_callback: callable = None,
 
                       ) -> TypeInputFile:
-    res = (await _internal_transfer_to_telegram(client, file, progress_callback))[0]
-    return res
+    async with parallel_transfer_locks[id(client)]:
+        res = (await _internal_transfer_to_telegram(client, file, progress_callback))[0]
+        return res
