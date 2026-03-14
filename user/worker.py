@@ -56,6 +56,44 @@ def _prepare_thumb_jpeg(data: bytes) -> bytes | None:
         return None
 
 
+def _finalize_media_send_metadata(
+    media_type: str,
+    cached_path: str | None,
+    attrs: list,
+    mime_type: str | None,
+    out_name: str | None,
+) -> tuple[list | None, str | None]:
+    attrs = list(attrs or [])
+    inferred_attrs = []
+    inferred_mime = None
+    if cached_path:
+        try:
+            inferred_attrs, inferred_mime = tg_utils.get_attributes(
+                cached_path,
+                mime_type=mime_type,
+                force_document=(media_type == 'document'),
+                supports_streaming=(media_type == 'video'),
+            )
+        except TypeError:
+            inferred_attrs, inferred_mime = tg_utils.get_attributes(cached_path)
+
+    if media_type == 'video':
+        if not mime_type or not mime_type.startswith('video/'):
+            mime_type = inferred_mime or 'video/mp4'
+        if not any(isinstance(attr, DocumentAttributeVideo) for attr in attrs):
+            inferred_video = next((attr for attr in inferred_attrs if isinstance(attr, DocumentAttributeVideo)), None)
+            if inferred_video:
+                attrs.insert(0, inferred_video)
+        if not any(isinstance(attr, DocumentAttributeFilename) for attr in attrs):
+            filename = out_name or (os.path.basename(cached_path) if cached_path else "video.mp4")
+            attrs.append(DocumentAttributeFilename(filename))
+    elif not attrs and inferred_attrs:
+        attrs = inferred_attrs
+        mime_type = mime_type or inferred_mime
+
+    return attrs or None, mime_type
+
+
 def get_media_type_string(media):
     if isinstance(media, MessageMediaPhoto):
         return "photo"
@@ -311,12 +349,13 @@ class UserWorker:
                     )
             if out_name:
                 attrs.append(DocumentAttributeFilename(out_name))
-        if media_type == 'video' and (not mime_type or not mime_type.startswith('video/')):
-            mime_type = 'video/mp4'
-        if not attrs and isinstance(file_to_send, str):
-            inferred_attrs, inferred_mime = tg_utils.get_attributes(file_to_send)
-            attrs = inferred_attrs
-            mime_type = mime_type or inferred_mime
+        attrs, mime_type = _finalize_media_send_metadata(
+            media_type,
+            file_to_send if isinstance(file_to_send, str) else None,
+            attrs,
+            mime_type,
+            out_name,
+        )
 
         payload = {
             'status': 'ready',
@@ -324,7 +363,7 @@ class UserWorker:
             'file_to_send': file_to_send,
             'content_hash': content_hash,
             'send_kwargs': send_kwargs,
-            'attrs': attrs or None,
+            'attrs': attrs,
             'mime_type': mime_type,
             'force_document': (media_type == 'document'),
         }

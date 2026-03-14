@@ -14,6 +14,7 @@ from telethon.errors import (
     TimedOutError,
 )
 from telethon.tl.types import MessageMediaDocument, DocumentAttributeFilename, DocumentAttributeVideo
+from telethon.tl.types import KeyboardButtonCallback
 from PIL import Image
 from telethon import utils as tg_utils
 
@@ -83,6 +84,50 @@ def _build_unique_cache_name(source_chat_id: int, msg_id: int, preferred_name: s
     if not safe_name:
         safe_name = f"media{fallback_ext}"
     return f"{source_chat_id}_{msg_id}_{safe_name}"
+
+
+def _migration_status_buttons(active: bool):
+    if not active:
+        return None
+    return [[KeyboardButtonCallback("⛔ Batalkan", b'mig_cancel')]]
+
+
+def _finalize_media_send_metadata(
+    media_type: str,
+    cached_path: str | None,
+    attrs: list,
+    mime_type: str | None,
+    out_name: str | None,
+) -> tuple[list | None, str | None]:
+    attrs = list(attrs or [])
+    inferred_attrs = []
+    inferred_mime = None
+    if cached_path:
+        try:
+            inferred_attrs, inferred_mime = tg_utils.get_attributes(
+                cached_path,
+                mime_type=mime_type,
+                force_document=(media_type == 'document'),
+                supports_streaming=(media_type == 'video'),
+            )
+        except TypeError:
+            inferred_attrs, inferred_mime = tg_utils.get_attributes(cached_path)
+
+    if media_type == 'video':
+        if not mime_type or not mime_type.startswith('video/'):
+            mime_type = inferred_mime or 'video/mp4'
+        if not any(isinstance(attr, DocumentAttributeVideo) for attr in attrs):
+            inferred_video = next((attr for attr in inferred_attrs if isinstance(attr, DocumentAttributeVideo)), None)
+            if inferred_video:
+                attrs.insert(0, inferred_video)
+        if not any(isinstance(attr, DocumentAttributeFilename) for attr in attrs):
+            filename = out_name or (os.path.basename(cached_path) if cached_path else "video.mp4")
+            attrs.append(DocumentAttributeFilename(filename))
+    elif not attrs and inferred_attrs:
+        attrs = inferred_attrs
+        mime_type = mime_type or inferred_mime
+
+    return attrs or None, mime_type
 
 
 async def _sleep_with_cancel(delay: float, stop_event: asyncio.Event | None):
@@ -212,7 +257,12 @@ async def run_migration(
                 pass
             if active_lines:
                 text += "\n" + "\n".join(active_lines)
-            await bot_client.edit_message(user_id, status_msg_id, text)
+            await bot_client.edit_message(
+                user_id,
+                status_msg_id,
+                text,
+                buttons=_migration_status_buttons(not migration_done and not (stop_event and stop_event.is_set()))
+            )
         except Exception:
             pass
 
@@ -577,14 +627,13 @@ async def run_migration(
                             # Ensure filename present
                             if out_name:
                                 attrs.append(DocumentAttributeFilename(out_name))
-                        # Fallbacks
-                        if media_type == 'video' and (not mime_type or not mime_type.startswith('video/')):
-                            mime_type = 'video/mp4'
-                        if not attrs:
-                            # As a last resort, let Telethon infer from path
-                            inferred_attrs, inferred_mime = tg_utils.get_attributes(cached_path)
-                            attrs = inferred_attrs
-                            mime_type = mime_type or inferred_mime
+                        attrs, mime_type = _finalize_media_send_metadata(
+                            media_type,
+                            cached_path,
+                            attrs,
+                            mime_type,
+                            out_name,
+                        )
 
                         force_doc = bool(send_kwargs.pop('force_document', media_type == 'document'))
                         await _run_with_retry(
@@ -617,8 +666,13 @@ async def run_migration(
                                     ))
                             if out_name:
                                 attrs.append(DocumentAttributeFilename(out_name))
-                        if media_type == 'video' and (not mime_type or not mime_type.startswith('video/')):
-                            mime_type = 'video/mp4'
+                        attrs, mime_type = _finalize_media_send_metadata(
+                            media_type,
+                            cached_path,
+                            attrs,
+                            mime_type,
+                            out_name,
+                        )
 
                         force_doc = bool(send_kwargs.pop('force_document', media_type == 'document'))
                         await _run_with_retry(
@@ -760,6 +814,8 @@ async def run_migration(
                     break
             if cancelled:
                 break
+    except asyncio.CancelledError:
+        cancelled = True
     finally:
         migration_done = True
         if status_task:

@@ -65,6 +65,7 @@ def dynamic_chat_list_keyboard(
     existing_ids: set = None,
     show_all=True,
     include_saved_messages: bool = False,
+    saved_messages_id: int | None = None,
 ):
     """
     Membuat keyboard dinamis dari daftar chat untuk pemilihan interaktif.
@@ -83,11 +84,23 @@ def dynamic_chat_list_keyboard(
         existing_ids = set()
         
     chat_buttons = []
+    seen_ids = set()
+    if include_saved_messages and saved_messages_id is not None:
+        is_existing = saved_messages_id in existing_ids
+        if show_all or is_existing:
+            button_text = "Saved Messages"
+            if is_existing and show_all:
+                button_text = f"✅ {button_text}"
+            callback_data = f"{base_callback_prefix}_{saved_messages_id}".encode('utf-8')
+            chat_buttons.append([KeyboardButtonCallback(button_text, callback_data)])
+        seen_ids.add(saved_messages_id)
     for dialog in dialogs:
         if not is_selectable_target_dialog(dialog, include_saved_messages=include_saved_messages):
             continue
 
         dialog_id = dialog.id
+        if dialog_id in seen_ids:
+            continue
         is_existing = dialog_id in existing_ids
 
         # Logika untuk menampilkan tombol:

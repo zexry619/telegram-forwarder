@@ -117,6 +117,15 @@ def setup_handlers(bot):
         except Exception:
             return str(chat_id)
 
+    def saved_messages_button(prefix: str, client, *, selected_id=None):
+        own_id = getattr(getattr(client, 'me', None), 'id', None)
+        if own_id is None:
+            return None
+        label = "Saved Messages"
+        if selected_id == own_id:
+            label = f"🎯 {label}"
+        return [KeyboardButtonCallback(label, f"{prefix}_{own_id}".encode('utf-8'))]
+
     async def render_route_detail(event, route: dict):
         client = await get_client_for_user(event.sender_id)
         source_label = await chat_label(client, route.get('source_chat_id')) if client else str(route.get('source_chat_id'))
@@ -258,8 +267,13 @@ def setup_handlers(bot):
             buttons = []
             if current_target:
                 buttons.append([KeyboardButtonCallback("🗑️ Hapus Target Saat Ini", b'delete_target')])
+            saved_btn = saved_messages_button("pick_target", client, selected_id=current_target)
+            if saved_btn:
+                buttons.append(saved_btn)
             for dialog in dialogs:
                 if not is_selectable_target_dialog(dialog, include_saved_messages=True):
+                    continue
+                if dialog.id == getattr(getattr(client, 'me', None), 'id', None):
                     continue
                 btn_text = get_dialog_display_name(dialog)[:40]
                 if dialog.id == current_target:
@@ -289,7 +303,9 @@ def setup_handlers(bot):
         await event.answer(f"Mengatur target ke ID: {target_id}...")
         await update_user_config(user_id, 'target_chat_id', target_id)
         await refresh_live_worker(user_id)
-        await event.edit(f"✅ **Target berhasil diatur ke:** `{target_id}`", buttons=main_menu_keyboard())
+        client = await get_client_for_user(user_id)
+        label = await chat_label(client, target_id) if client else str(target_id)
+        await event.edit(f"✅ **Target berhasil diatur ke:** `{label}`", buttons=main_menu_keyboard())
 
     @bot.on(events.CallbackQuery(data=b'delete_target'))
     @authorized_only
@@ -665,7 +681,12 @@ def setup_handlers(bot):
         dialogs = await client.get_dialogs(limit=100)
         buttons = [[KeyboardButtonCallback("🌐 Semua Chat", f"route_pick_source_any_{route_id}".encode())]]
         buttons.extend(dynamic_chat_list_keyboard(
-            dialogs, f"route_pick_source_{route_id}", set(), show_all=True, include_saved_messages=True
+            dialogs,
+            f"route_pick_source_{route_id}",
+            set(),
+            show_all=True,
+            include_saved_messages=True,
+            saved_messages_id=getattr(getattr(client, 'me', None), 'id', None),
         ))
         buttons.append([KeyboardButtonCallback("⬅️ Kembali", f"route_view_{route_id}".encode())])
         await try_edit(event, "Pilih sumber route. Gunakan `Semua Chat` jika route ini berlaku global.", buttons=buttons)
@@ -699,7 +720,12 @@ def setup_handlers(bot):
         client = await get_client_for_user(event.sender_id)
         dialogs = await client.get_dialogs(limit=100)
         buttons = dynamic_chat_list_keyboard(
-            dialogs, f"route_pick_target_{route_id}", set(), show_all=True, include_saved_messages=True
+            dialogs,
+            f"route_pick_target_{route_id}",
+            set(),
+            show_all=True,
+            include_saved_messages=True,
+            saved_messages_id=getattr(getattr(client, 'me', None), 'id', None),
         )
         buttons.append([KeyboardButtonCallback("⬅️ Kembali", f"route_view_{route_id}".encode())])
         await try_edit(event, "Pilih tujuan route ini:", buttons=buttons)
@@ -986,7 +1012,12 @@ def setup_handlers(bot):
             return await event.answer("Harap login terlebih dahulu.", alert=True)
         dialogs = await client.get_dialogs(limit=100)
         buttons = dynamic_chat_list_keyboard(
-            dialogs, "mig_pick_src", set(), show_all=True, include_saved_messages=True
+            dialogs,
+            "mig_pick_src",
+            set(),
+            show_all=True,
+            include_saved_messages=True,
+            saved_messages_id=getattr(getattr(client, 'me', None), 'id', None),
         )
         buttons.append([KeyboardButtonCallback("⬅️ Kembali", b'main_menu')])
         await try_edit(event, "Pilih Grup/Channel/Saved Messages Sumber:", buttons=buttons)
@@ -1018,7 +1049,12 @@ def setup_handlers(bot):
             return await event.answer("Harap login terlebih dahulu.", alert=True)
         dialogs = await client.get_dialogs(limit=100)
         buttons = dynamic_chat_list_keyboard(
-            dialogs, "mig_pick_dst", set(), show_all=True, include_saved_messages=True
+            dialogs,
+            "mig_pick_dst",
+            set(),
+            show_all=True,
+            include_saved_messages=True,
+            saved_messages_id=getattr(getattr(client, 'me', None), 'id', None),
         )
         buttons.append([KeyboardButtonCallback("⬅️ Kembali", b'main_menu')])
         await try_edit(event, "Pilih Grup/Channel/Saved Messages Tujuan:", buttons=buttons)
@@ -1155,13 +1191,24 @@ def setup_handlers(bot):
         MIGRATION_STATE[user_id]['stop_event'] = stop_event
         MIGRATION_STATE[user_id]['status_msg_id'] = status.id
 
-        task = _asyncio.get_event_loop().create_task(
-            run_migration(
-                user_id, client, bot, src, dst,
-                limit=lim, dedupe_mode=dmode, concurrency=conc,
-                stop_event=stop_event, status_msg_id=status.id
-            )
-        )
+        async def migration_runner():
+            try:
+                await run_migration(
+                    user_id, client, bot, src, dst,
+                    limit=lim, dedupe_mode=dmode, concurrency=conc,
+                    stop_event=stop_event, status_msg_id=status.id
+                )
+            except _asyncio.CancelledError:
+                pass
+            finally:
+                state = MIGRATION_STATE.get(user_id)
+                if state and state.get('task') is _asyncio.current_task():
+                    state.pop('task', None)
+                    state.pop('stop_event', None)
+                    state.pop('status_msg_id', None)
+                    MIGRATION_STATE[user_id] = state
+
+        task = _asyncio.get_event_loop().create_task(migration_runner())
         MIGRATION_STATE[user_id]['task'] = task
 
     @bot.on(events.CallbackQuery(data=b'mig_cancel'))
@@ -1172,9 +1219,14 @@ def setup_handlers(bot):
         state = MIGRATION_STATE.get(user_id)
         if not state or not state.get('task'):
             return await event.answer("Tidak ada migrasi yang berjalan.", alert=True)
+        task = state.get('task')
+        if task.done():
+            return await event.answer("Migrasi tersebut sudah selesai.", alert=True)
         stop_event = state.get('stop_event')
         if stop_event:
             stop_event.set()
+        if task and not task.done():
+            task.cancel()
         await event.answer("Sedang membatalkan migrasi…", alert=False)
         try:
             await bot.edit_message(user_id, state.get('status_msg_id'), "⛔ Membatalkan migrasi…")
