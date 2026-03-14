@@ -342,7 +342,14 @@ def setup_handlers(bot):
         try:
             dialogs = await client.get_dialogs(limit=50)
             config = await get_user_config(user_id)
-            buttons = dynamic_chat_list_keyboard(dialogs, "excl_add", config.get('excluded_chat_ids', set()), show_all=True)
+            buttons = dynamic_chat_list_keyboard(
+                dialogs,
+                "excl_add",
+                config.get('excluded_chat_ids', set()),
+                show_all=True,
+                include_saved_messages=True,
+                saved_messages_id=getattr(getattr(client, 'me', None), 'id', None),
+            )
             buttons.append([KeyboardButtonCallback("⬅️ Kembali ke Menu Pengecualian", b'set_exclude')])
             await try_edit(event, "Pilih chat untuk **ditambahkan** ke pengecualian (yang sudah ada ditandai ✅):", buttons=buttons)
         except Exception as e: 
@@ -362,7 +369,14 @@ def setup_handlers(bot):
             existing_ids = config.get('excluded_chat_ids', set())
             if not existing_ids: return await event.answer("Daftar pengecualian Anda kosong.", alert=True)
             dialogs = await client.get_dialogs(limit=100)
-            buttons = dynamic_chat_list_keyboard(dialogs, "excl_rem", existing_ids, show_all=False)
+            buttons = dynamic_chat_list_keyboard(
+                dialogs,
+                "excl_rem",
+                existing_ids,
+                show_all=False,
+                include_saved_messages=True,
+                saved_messages_id=getattr(getattr(client, 'me', None), 'id', None),
+            )
             buttons.append([KeyboardButtonCallback("⬅️ Kembali ke Menu Pengecualian", b'set_exclude')])
             await try_edit(event, "Pilih chat untuk **dihapus** dari pengecualian:", buttons=buttons)
         except Exception as e: 
@@ -865,6 +879,7 @@ def setup_handlers(bot):
             route.get('excluded_chat_ids', set()),
             show_all=True,
             include_saved_messages=True,
+            saved_messages_id=getattr(getattr(client, 'me', None), 'id', None),
         )
         buttons.append([KeyboardButtonCallback("⬅️ Kembali", f"route_exclude_menu_{route_id}".encode())])
         await try_edit(event, f"Pilih chat untuk ditambahkan ke pengecualian route `{route.get('name')}`:", buttons=buttons)
@@ -891,6 +906,7 @@ def setup_handlers(bot):
             existing_ids,
             show_all=False,
             include_saved_messages=True,
+            saved_messages_id=getattr(getattr(client, 'me', None), 'id', None),
         )
         buttons.append([KeyboardButtonCallback("⬅️ Kembali", f"route_exclude_menu_{route_id}".encode())])
         await try_edit(event, f"Pilih chat untuk dihapus dari pengecualian route `{route.get('name')}`:", buttons=buttons)
