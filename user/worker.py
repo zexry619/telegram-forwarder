@@ -353,7 +353,7 @@ class UserWorker:
         content_hash = self._sha256_file(file_to_send) if isinstance(file_to_send, str) else None
 
         send_kwargs = {'caption': caption}
-        if shared_ctx.get('thumb_bytes') and media_type != 'video':
+        if shared_ctx.get('thumb_bytes'):
             normalized_thumb = _prepare_thumb_jpeg(shared_ctx['thumb_bytes'])
             if normalized_thumb:
                 send_kwargs['thumb'] = normalized_thumb

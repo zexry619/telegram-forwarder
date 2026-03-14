@@ -601,7 +601,7 @@ async def run_migration(
                     }
                     # Thumb optional
                     thumb_data = thumb_bytes if thumb_md5 else None
-                    if thumb_data is None and media_type != 'video':
+                    if thumb_data is None:
                         try:
                             thumb_data = await _run_with_retry(
                                 lambda: client.download_media(m, file=bytes, thumb=0),
@@ -609,7 +609,7 @@ async def run_migration(
                             )
                         except Exception:
                             thumb_data = None
-                    if thumb_data and media_type != 'video':
+                    if thumb_data:
                         norm_thumb = _prepare_thumb_jpeg(thumb_data)
                         if norm_thumb:
                             send_kwargs['thumb'] = norm_thumb
